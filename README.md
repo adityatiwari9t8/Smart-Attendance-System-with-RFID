@@ -74,7 +74,7 @@ drops, a backend outage, or pulling the plug mid-class lose nothing. See
 
 | Part | Notes |
 |---|---|
-| **ESP32 DevKit** with an **ESP-WROOM-32** module (30- or 38-pin "DevKit V1" / "DevKitC") | ⚠️ Must be the *classic* ESP32. **Not** ESP32-S2 / S3 / C3 / C6 boards: those are different chips and the pin numbers here don't apply. A 38-pin board is too wide for one breadboard; use two breadboards side by side. |
+| **ESP32 DevKit V1, 30-pin**, with an **ESP-WROOM-32** module | The [wiring diagrams](#-wiring) show this board. ⚠️ Must be the *classic* ESP32. **Not** ESP32-S2 / S3 / C3 / C6 boards: those are different chips and the pin numbers here don't apply. A 38-pin board ("DevKitC") also works, but its pins sit in a different order — match the printed labels, not the positions in the picture. |
 | **MFRC522 RFID module (13.56 MHz)** + cards/tags | ⚠️ **Must be 13.56 MHz (MIFARE).** Many college ID cards and cheap key fobs are **125 kHz** and an MFRC522 *cannot read them*. Test your actual ID card before relying on it — if it's 125 kHz, use the cards/tags that come with the module. The header pins usually come loose in the bag: **solder them** (see wiring notes). |
 | **SSD1306 OLED, 0.96", 128×64, I²C** (4-pin: GND VCC SCL SDA) | ⚠️ **SSD1306, not SH1106.** Most **1.3"** OLEDs are SH1106 and show garbage with this code. Not the 7-pin SPI version either. Address 0x3C or 0x3D — both are detected automatically. |
 | **3 LEDs** (green, red, blue) + **3 × 220 Ω resistors** | The resistors are **required** — an LED wired straight to a GPIO overloads the pin. |
@@ -115,9 +115,21 @@ warning and shows **CHECK secrets.h** on the OLED.
 
 ## 🔌 Wiring
 
-This table is the wiring; `test/check_wiring.py` fails if it and the pins in
-`include/config.h` ever disagree. **Everything runs from 3.3 V — never connect
-the MFRC522 to 5 V / VIN.** Wire with the USB cable **unplugged**.
+**Everything runs from 3.3 V — never connect the MFRC522 to 5 V / VIN.** Wire
+with the USB cable **unplugged**.
+
+[![Full wiring diagram: ESP32 DevKit V1 with the RFID reader, OLED, three LEDs, buzzer and push button](docs/wiring/wiring.svg)](docs/wiring/wiring.svg)
+
+The picture shows the 30-pin ESP32 DevKit V1 from the top, USB at the bottom.
+Match each wire by the **label printed on your board** (`D5` is GPIO 5; some
+boards print `IO5`, `G5` or just `5`). The long red/blue strips are the
+breadboard power rails: plug the ESP32's `3V3` into the red (+) rail and `GND`
+into the blue (−) rail, and everything else takes power from there. Building
+it one part at a time? There's a picture per step in
+[Bring it up in stages](#-bring-it-up-in-stages).
+
+The same wiring as a table — `test/check_wiring.py` fails if it, the pictures
+and `include/config.h` ever disagree:
 
 | Module pin | → | ESP32 | Notes |
 |---|---|---|---|
@@ -171,8 +183,35 @@ missing (no OLED → it runs headless; no reader → it warns), so add one part
 at a time and confirm it before the next. If something is wrong you then
 know exactly which ten wires to look at.
 
-| Stage | Wire | Then check (serial monitor, 115200) |
-|---|---|---|
+Keep the serial monitor open (`pio device monitor`, 115200) the whole time.
+
+**Step 1 — bare board.** Nothing wired, just USB. Upload works; the boot log
+appears; `[CONFIG]` warnings (if any) say what to fix in `secrets.h`; you see
+`Wi-Fi connected` and `Clock set via NTP`.
+
+**Step 2 — RFID reader.**
+
+[![Step 2 wiring: RFID reader](docs/wiring/step-2-rfid.svg)](docs/wiring/step-2-rfid.svg)
+
+Check: the boot log says `MFRC522 version 0x92 (OK)` (or 0x91; clones say
+0x12 / 0x88 / 0xB2 — also fine). `0x00`/`0xFF` = recheck the 7 wires. Tap a
+card → `[SCAN] UID: ...`.
+
+**Step 3 — OLED display.**
+
+[![Step 3 wiring: OLED display](docs/wiring/step-3-oled.svg)](docs/wiring/step-3-oled.svg)
+
+Check: the boot log says `OLED found at I2C 0x3C`; the screen shows
+`SYSTEM READY`.
+
+**Step 4 — LEDs, buzzer, button.**
+
+[![Step 4 wiring: LEDs, buzzer and button](docs/wiring/step-4-leds-buzzer-button.svg)](docs/wiring/step-4-leds-buzzer-button.svg)
+
+Check: `SELFTEST` → green, red, blue in turn, then two beeps. Short-press the
+button → `Present: 0 / N` on the screen.
+
+---|---|---|
 | 1 | **Nothing** — bare board on USB | Upload works; boot log appears; `[CONFIG]` warnings (if any) tell you what to fix in `secrets.h`; `Wi-Fi connected` and `Clock set via NTP`. |
 | 2 | + **MFRC522** | Boot log says `MFRC522 version 0x92 (OK)` (or 0x91; clones say 0x12 / 0x88 / 0xB2 — also fine). `0x00`/`0xFF` = recheck the 7 wires. Tap a card → `[SCAN] UID: ...`. |
 | 3 | + **OLED** | Boot log says `OLED found at I2C 0x3C`; screen shows `SYSTEM READY`. |
@@ -290,6 +329,7 @@ login page instead of an answer.
 | Suite | What it proves |
 |---|---|
 | `test/check_wiring.py` | `config.h` ↔ the README wiring table agree; no pin reuse; no flash/strapping/UART pins; every LED and the buzzer has a resistor; modules on 3V3 |
+| `tools/wiring_diagram.py --check` | The wiring pictures in `docs/wiring/` were drawn from the current `config.h` |
 | `node --test test/backend/appsscript.test.js` | The real `AppsScript.gs` against a fake sheet: auth, duplicates (incl. numeric UIDs), late-upload timestamps, the sheet's time zone, bad cells, lock contention |
 | `pio test -e native` | Roster/attendance persistence, stale flags after power-on, enroll/remove, UID validation, outbox (FIFO, reboot, overflow, corrupt flash), reply classification, day rollover, 7-byte UIDs |
 | `pio run -e hardware` | The firmware compiles warning-free |
@@ -306,6 +346,7 @@ that's what the staged bring-up and the checklist are for. See
 ```
 ├── backend/AppsScript.gs        # Google Sheets Web App
 ├── docs/ARCHITECTURE.md         # Data flow + design decisions
+├── docs/wiring/                 # Wiring diagrams (generated from config.h)
 ├── include/                     # config.h (pins/timing), headers, secrets
 ├── src/
 │   ├── main.cpp                 # Orchestration, serial console, upload pump
@@ -315,6 +356,7 @@ that's what the staged bring-up and the checklist are for. See
 │   ├── BackendResponse.*        # What an Apps Script reply means
 │   ├── DisplayUI.*  FeedbackIndicators.*
 ├── test/                        # run_all.sh, native/, backend/, mocks/, check_wiring.py
+├── tools/wiring_diagram.py      # Redraws docs/wiring/ after a pin change
 └── platformio.ini               # envs: hardware (default, the ESP32), native (tests)
 ```
 

@@ -16,8 +16,9 @@ if [ ! -f include/secrets.h ]; then
 fi
 trap '[ "$CREATED_SECRETS" = 1 ] && rm -f include/secrets.h' EXIT
 
-echo "== 1/4  Wiring: config.h vs the README wiring table, pin safety =="
+echo "== 1/4  Wiring: config.h vs the README table + diagrams, pin safety =="
 python3 test/check_wiring.py
+python3 tools/wiring_diagram.py --check
 
 echo "== 2/4  Backend: Apps Script logic =="
 node --test test/backend/appsscript.test.js

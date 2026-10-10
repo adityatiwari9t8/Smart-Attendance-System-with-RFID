@@ -4,7 +4,8 @@
 //
 // Every pin you wire is defined here, and must match the wiring table in
 // README.md. test/check_wiring.py checks both, plus ESP32 pin safety.
-// If you change a pin here, update the README table too (and vice versa).
+// If you change a pin here, update the README table too and redraw the
+// pictures with `python3 tools/wiring_diagram.py`.
 // =====================================================================
 
 // ---------------------------------------------------------------------

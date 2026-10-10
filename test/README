@@ -6,6 +6,7 @@ Automated tests
 runs everything below (needs PlatformIO, Node 18+, Python 3):
 
   test/check_wiring.py             config.h <-> README wiring table + ESP32 pin safety
+  tools/wiring_diagram.py --check  the diagrams in docs/wiring/ match config.h
   test/backend/appsscript.test.js  backend/AppsScript.gs against a fake spreadsheet
   test/test_native/test_main.cpp   firmware logic on the host (pio test -e native);
                                    Arduino String / Preferences come from test/mocks/

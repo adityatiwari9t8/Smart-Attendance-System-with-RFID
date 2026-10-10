@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased - Wiring diagrams
+
+- README shows a full wiring diagram of the 30-pin ESP32 DevKit V1 with
+  every module, plus one picture per bring-up step (RFID, OLED, LEDs /
+  buzzer / button). Drawn by `tools/wiring_diagram.py` straight from the
+  pins in `config.h`; `test/run_all.sh` fails if they fall out of date.
+
 ## Unreleased - Real hardware only
 
 - Dropped the Wokwi simulator: removed the `wokwi` env, `wokwi.toml`,
