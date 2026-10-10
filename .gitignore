@@ -10,3 +10,6 @@
 # Real credentials — never commit this. Copy include/secrets.example.h
 # to include/secrets.h and fill it in locally instead.
 include/secrets.h
+
+# Your filled-in copy of the Apps Script (contains the real API key).
+backend/*.local.gs

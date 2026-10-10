@@ -1,30 +1,78 @@
 #pragma once
 #include <Arduino.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
-enum class SyncResult {
-  OFFLINE,       // Wi-Fi never connected — request wasn't attempted
-  SUCCESS,       // HTTP 2xx from the Apps Script
-  HTTP_ERROR     // request sent but got a non-2xx or connection error
+#include "BackendResponse.h"
+
+// Result of one background upload, delivered back to loop() through a
+// FreeRTOS queue once the HTTPS request finishes.
+//
+// IMPORTANT: this struct is copied byte-for-byte across the queue
+// (xQueueSend/xQueueReceive do a raw memcpy). It must stay pure POD - no
+// Arduino `String` members. A String is really a pointer to a heap buffer
+// plus a destructor; memcpy-ing one leaves two Strings sharing a buffer
+// that the sender frees right after xQueueSend() returns.
+struct SyncOutcome {
+  BackendAction action;  // DELIVERED / DROP / RETRY - what main should do with the record
+  int httpCode;          // HTTPClient code; negative = connection/TLS failure
+  uint32_t ts;           // echoes the record's timestamp (with uid, identifies the record)
+  char uid[24];
+  char message[96];      // best-effort copy of the backend's reply text
 };
 
-// Owns the Wi-Fi connection and talks to the Google Apps Script backend
-// over HTTPS. Everything network-related lives here so main.cpp only
-// ever calls two methods: connect() once at boot, logAttendance() per tap.
+// Owns Wi-Fi, the clock, and the HTTPS upload to the Google Apps Script
+// backend. main.cpp never touches WiFi/HTTPClient directly.
+//
+// Uploads run on their OWN FreeRTOS task pinned to core 0, so a slow or
+// hung network call never stalls loop() (RFID polling on core 1). Only
+// ONE upload is ever in flight: two concurrent TLS sessions would need
+// roughly double the heap, and the outbox already serializes the work.
 class AttendanceLogger {
  public:
-  // Attempts to join Wi-Fi, giving up after WIFI_CONNECT_TIMEOUT_MS.
-  // Returns true if connected. On failure the device carries on in
-  // offline mode instead of hanging forever.
+  // Joins Wi-Fi, giving up after WIFI_CONNECT_TIMEOUT_MS (boot only, so
+  // blocking is fine). Even on failure the Wi-Fi stack keeps retrying in
+  // the background, and maintain() nudges it too.
   bool connect();
 
+  // Live link state (not a boot-time snapshot).
   bool isConnected() const;
 
-  // Sends one attendance record. Blocks for up to HTTP_REQUEST_TIMEOUT_MS.
-  // Returns HTTP_ERROR on any non-2xx response or transport failure —
-  // the caller decides whether that should still count as "present".
-  SyncResult logAttendance(const String& uid, const String& name,
-                            int& outHttpCode);
+  // The network it joins (WIFI_SSID from secrets.h).
+  const char* ssid() const;
+
+  // Creates the result queue. Call once in setup().
+  void beginAsync();
+
+  // Call every loop(): re-kicks a dropped Wi-Fi link and starts NTP the
+  // first time the link is up. Never blocks.
+  void maintain();
+
+  // True while an upload task is running OR its result hasn't been
+  // collected via pollResult() yet.
+  bool busy() const { return _busy; }
+
+  // Starts uploading one record on the background task. Returns false
+  // (nothing started) if busy or not connected.
+  bool startUpload(const String& uid, const String& name, uint32_t ts);
+
+  // Returns true and fills `out` if an upload finished since the last
+  // call. Never blocks.
+  bool pollResult(SyncOutcome& out);
 
  private:
-  bool _connected = false;
+  struct SyncJob {
+    String uid;
+    String name;
+    uint32_t ts;
+    AttendanceLogger* self;
+  };
+
+  static void syncTaskEntry(void* param);
+  SyncOutcome doSync(const String& uid, const String& name, uint32_t ts);
+
+  QueueHandle_t _resultQueue = nullptr;
+  volatile bool _busy = false;
+  bool _timeStarted = false;
+  unsigned long _lastWifiNudgeMs = 0;
 };

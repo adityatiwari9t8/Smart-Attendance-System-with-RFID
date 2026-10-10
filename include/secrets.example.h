@@ -7,12 +7,16 @@
 //
 //   cp include/secrets.example.h include/secrets.h
 //
+// The firmware checks these at boot and prints a [CONFIG] warning (and
+// shows "CHECK secrets.h" on the OLED) if any placeholder is left in.
 // =====================================================================
 
-// Wokwi's simulated network is always open and named "Wokwi-GUEST".
-// Change these only if you flash this onto real hardware on a real network.
-#define WIFI_SSID       "Wokwi-GUEST"
-#define WIFI_PASSWORD   ""
+// The network the REAL board joins - usually your phone's hotspot. It
+// must be 2.4 GHz and WPA2-Personal: the ESP32 can't join 5 GHz-only,
+// WPA2-Enterprise or captive-portal (login page) networks. The name is
+// case-sensitive.
+#define WIFI_SSID       "YOUR_WIFI_NAME"
+#define WIFI_PASSWORD   "YOUR_WIFI_PASSWORD"
 
 // Your deployed Google Apps Script Web App URL (Deploy > New deployment
 // > Web app > "Anyone" access). Ends in /exec.

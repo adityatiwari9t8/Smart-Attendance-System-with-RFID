@@ -14,16 +14,19 @@ void FeedbackIndicators::begin() {
 
 void FeedbackIndicators::success() {
   digitalWrite(PIN_LED_GREEN, HIGH);
+  // tone(..., duration) is already non-blocking on the ESP32 Arduino
+  // core - it schedules the buzzer to stop itself via a timer, it
+  // doesn't sleep here. Only the LED hold needed the delay() removed.
   tone(PIN_BUZZER, TONE_SUCCESS_HZ, TONE_SUCCESS_MS);
-  delay(SUCCESS_BEEP_HOLD_MS);
-  digitalWrite(PIN_LED_GREEN, LOW);
+  _state = HoldState::SUCCESS_HOLD;
+  _holdStartMs = millis();
 }
 
 void FeedbackIndicators::error() {
   digitalWrite(PIN_LED_RED, HIGH);
   tone(PIN_BUZZER, TONE_ERROR_HZ, TONE_ERROR_MS);
-  delay(ERROR_BEEP_HOLD_MS);
-  digitalWrite(PIN_LED_RED, LOW);
+  _state = HoldState::ERROR_HOLD;
+  _holdStartMs = millis();
 }
 
 void FeedbackIndicators::wifiConnected() {
@@ -32,4 +35,31 @@ void FeedbackIndicators::wifiConnected() {
 
 void FeedbackIndicators::networkBusy(bool on) {
   digitalWrite(PIN_LED_BLUE, on ? HIGH : LOW);
+}
+
+void FeedbackIndicators::selfTest() {
+  const int leds[] = {PIN_LED_GREEN, PIN_LED_RED, PIN_LED_BLUE};
+  for (int pin : leds) {
+    digitalWrite(pin, HIGH);
+    delay(350);
+    digitalWrite(pin, LOW);
+  }
+  tone(PIN_BUZZER, TONE_SUCCESS_HZ, 200);
+  delay(300);
+  tone(PIN_BUZZER, TONE_ERROR_HZ, 300);
+  delay(400);
+  _state = HoldState::IDLE;
+}
+
+void FeedbackIndicators::update() {
+  if (_state == HoldState::IDLE) return;
+
+  unsigned long holdMs =
+      (_state == HoldState::SUCCESS_HOLD) ? SUCCESS_BEEP_HOLD_MS : ERROR_BEEP_HOLD_MS;
+
+  if (millis() - _holdStartMs >= holdMs) {
+    digitalWrite(PIN_LED_GREEN, LOW);
+    digitalWrite(PIN_LED_RED, LOW);
+    _state = HoldState::IDLE;
+  }
 }
