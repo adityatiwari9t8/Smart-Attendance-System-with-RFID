@@ -70,6 +70,7 @@
 #define TLS_HANDSHAKE_TIMEOUT_MS  15000
 #define RESULT_DISPLAY_MS           900
 #define SUCCESS_DISPLAY_MS          900
+#define CLOUD_CONFIRM_DISPLAY_MS   2500
 #define SUCCESS_BEEP_HOLD_MS        150
 #define ERROR_BEEP_HOLD_MS          200
 #define RESET_HOLD_MS              3000
@@ -1021,6 +1022,7 @@ void handleUploadResult(const SyncOutcome& o) {
 
   String line1 = name, line2, line3;
   const char* title;
+  unsigned long displayMs = SUCCESS_DISPLAY_MS;
 
   switch (o.action) {
     case BackendAction::DELIVERED:
@@ -1028,8 +1030,9 @@ void handleUploadResult(const SyncOutcome& o) {
       uploadFailures = 0; nextUploadAt = 0;
       Serial.printf("[SYNC] %s: %s\n", o.uid, o.message);
       title = "ATTENDANCE LOGGED";
-      line2  = String(o.message).startsWith("Duplicate") ? "Already in sheet" : "Status: Present";
-      line3  = "Cloud: Synced";
+      line2  = String(o.message).startsWith("Duplicate") ? "Already in sheet" : "P saved to sheet";
+      line3  = "Tap next card";
+      displayMs = CLOUD_CONFIRM_DISPLAY_MS;
       break;
 
     case BackendAction::DROP:
@@ -1048,17 +1051,16 @@ void handleUploadResult(const SyncOutcome& o) {
       nextUploadAt = millis() + backoff;
       Serial.printf("[SYNC] %s not delivered (HTTP %d: %s) – retry in %lu s, %d queued\n",
                     o.uid, o.httpCode, o.message, backoff / 1000UL, outbox.size());
-      title = "SAVED LOCALLY";
-      line2  = "Will sync later";
+      title = "NOT CONFIRMED";
+      line2  = "Retrying upload";
       line3  = String(o.message).indexOf("API key") >= 0 ? "Check API key!" : "Err: " + String(o.httpCode);
+      displayMs = 0xFFFFFFFFUL;  // Keep waiting until the sheet confirms or rejects the upload.
       break;
     }
   }
 
-  if (name.length() > 0 &&
-      String(o.uid) == lastScannedUid &&
-      (millis() - lastScanMs) < RESULT_BANNER_WINDOW_MS) {
-    showTimedMessage(title, line1, line2, line3, SUCCESS_DISPLAY_MS);
+  if (name.length() > 0 && String(o.uid) == lastScannedUid) {
+    showTimedMessage(title, line1, line2, line3, displayMs);
   }
 }
 
@@ -1307,7 +1309,7 @@ void loop() {
   showTimedMessage("WELCOME!",
                    name,
                    cloud.isConnected() ? "Saving to cloud..." : "Saved (offline)",
-                   "Tap next card", SUCCESS_DISPLAY_MS);
+                   "Wait for confirmation", 0xFFFFFFFFUL);
   feedback.success();
   nextUploadAt = 0;  // a fresh tap should not wait out a previous backoff
 }
