@@ -2,7 +2,6 @@ var API_KEY = 'YOUR_API_KEY';
 
 var ATTENDANCE_SHEET_NAME = 'RFID Attendance';
 var ATTENDANCE_HEADERS = ['Student Name', 'Card UID', ''];
-var MAX_STUDENTS = 2;
 var FIRST_DATE_COLUMN = 4;
 
 function doGet(e) {
@@ -39,10 +38,6 @@ function handleAttendanceRequest_(e) {
     var timeZone = spreadsheet.getSpreadsheetTimeZone() || Session.getScriptTimeZone();
     var attendanceSheet = getAttendanceSheet_(spreadsheet);
     var roster = readStudentRoster_(attendanceSheet);
-    if (roster.length > MAX_STUDENTS) {
-      return textResponse_('Error: RFID Attendance roster is limited to ' + MAX_STUDENTS + ' entries');
-    }
-
     var student = findStudentByUid_(roster, uid);
     if (!student) {
       return textResponse_('Error: UID not found in RFID Attendance column B');

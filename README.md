@@ -21,7 +21,7 @@ Students tap a card → checked against the roster → logged on an OLED display
 | ☁️ **Offline upload queue** | Accepted taps are saved to flash and retried when Wi-Fi is available; the queue holds up to 60 taps. When full, new taps are clearly rejected for retry instead of deleting older queued records. |
 | 📡 **Auto reconnect** | Wi-Fi drops are recovered automatically; taps made offline upload later with the **original tap time** |
 | 🌙 **Midnight rollover** | Attendance flags clear at midnight (via NTP) so the next day starts fresh |
-| 📋 **Two-student demo roster** | Up to two students can be enrolled with `ENROLL`/`ADD`; the roster survives reboots |
+| 📋 **Expandable student roster** | Enroll up to 50 students with `ENROLL`/`ADD`; the roster survives reboots |
 | 🖥️ **Serial console** | Enroll/remove students, view roster, check status — all over the USB serial monitor |
 | 🔆 **OLED + LED + Buzzer** | Visual and audible feedback for every scan result |
 

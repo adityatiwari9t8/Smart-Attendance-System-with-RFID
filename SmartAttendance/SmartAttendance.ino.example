@@ -91,7 +91,7 @@
 #define ENROLL_WINDOW_MS          15000
 
 // ── Roster / UID limits ───────────────────────────────────────────────
-#define MAX_STUDENTS    2
+#define MAX_STUDENTS   50
 #define MAX_UID_LENGTH 15
 
 // ── Buzzer tones ──────────────────────────────────────────────────────
@@ -314,10 +314,20 @@ public:
       { outError = "UID already enrolled as " + _roster[existing].name; return false; }
 
     int slot = _rosterSlots;
+    for (int candidate = 0; candidate < _rosterSlots; candidate++) {
+      String savedUid = _rosterPrefs.getString(db_internal::slotKey('u', candidate).c_str(), "");
+      String savedName = _rosterPrefs.getString(db_internal::slotKey('m', candidate).c_str(), "");
+      if (savedUid.length() == 0 || savedName.length() == 0) {
+        slot = candidate;
+        break;
+      }
+    }
     _rosterPrefs.putString(db_internal::slotKey('u', slot).c_str(), uid);
     _rosterPrefs.putString(db_internal::slotKey('m', slot).c_str(), name);
-    _rosterPrefs.putInt("cnt", slot + 1);
-    _rosterSlots = slot + 1;
+    if (slot == _rosterSlots) {
+      _rosterSlots++;
+      _rosterPrefs.putInt("cnt", _rosterSlots);
+    }
 
     _roster[_count] = {uid, name, false};
     _count++;
