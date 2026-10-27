@@ -5,15 +5,15 @@
  * file in as Code.gs > Deploy > New deployment > Web app >
  *   Execute as: Me
  *   Who has access: Anyone
- * Copy the resulting /exec URL into include/secrets.h as
- * GOOGLE_SCRIPT_URL.
+ * Copy the resulting /exec URL into GOOGLE_SCRIPT_URL in your local
+ * SmartAttendance/SmartAttendance.ino upload sketch.
  *
  * Whenever you EDIT this file after the first deploy, you must also do
  * Deploy > Manage deployments > (pencil icon) > New version, otherwise
  * the live URL keeps serving the old code.
  */
 
-// Must exactly match API_KEY in include/secrets.h on the firmware side.
+// Must exactly match API_KEY in your local Arduino sketch.
 // This is a simple shared-secret check - anyone who knows this string can
 // write attendance rows, so treat it like a password and NEVER commit the
 // real value (this file ships with a placeholder; paste your key into the

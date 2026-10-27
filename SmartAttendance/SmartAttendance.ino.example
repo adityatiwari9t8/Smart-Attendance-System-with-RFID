@@ -1,0 +1,1313 @@
+// =====================================================================
+// SmartAttendance.ino  —  Single-file Arduino IDE version
+//
+// Tap an RFID card -> looked up against the roster -> saved to flash and
+// queued in the outbox -> shown on the OLED + LEDs / buzzer -> a
+// background FreeRTOS task uploads the outbox to a Google Sheet (HTTPS).
+//
+// A tap is NEVER lost: it is durable the moment it is accepted, and it
+// stays queued until the backend confirms it.  Wi-Fi drops, backend
+// outages, and power cuts are all handled.
+//
+// Duplicate attendance on the SAME calendar date is blocked both locally
+// (Student.logged flag + NTP day-rollover) and by the Apps Script itself
+// ("Duplicate" response = already in the sheet for today).
+//
+// ── Credentials (already filled in) ────────────────────────────────
+//   Wi-Fi SSID     : Dark_98
+//   Script URL     : https://script.google.com/macros/s/
+//                    AKfycbztuadEKdYnplTQnfGBNoqNhyFn6njOKJKXBlCvy
+//                    WCpuNw-58kDp0R0IYUAgswAPrGshA/exec
+//   API key        : aae0deba654d5d36a9b143d6029e480a
+//
+// ── Libraries needed (install via Sketch → Include Library → Manage Libraries)
+//   • MFRC522        (by GithubCommunity)
+//   • Adafruit SSD1306
+//   • Adafruit GFX Library
+//   Board: "ESP32 Dev Module"  |  Upload speed: 921600  |  Port: your COM
+// =====================================================================
+
+// =====================================================================
+// SECTION 0 – CREDENTIALS & CONFIGURATION
+// (everything that would have been in secrets.h and config.h)
+// =====================================================================
+
+// ── Wi-Fi ────────────────────────────────────────────────────────────
+#define WIFI_SSID        "YOUR_WIFI_NAME"
+#define WIFI_PASSWORD    "YOUR_WIFI_PASSWORD"
+
+// ── Google Apps Script Web-App URL (must end with /exec) ─────────────
+#define GOOGLE_SCRIPT_URL \
+  "https://script.google.com/macros/s/YOUR_SCRIPT_ID/exec"
+
+// ── Shared secret the Apps Script checks ────────────────────────────
+#define API_KEY          "change-this-shared-secret"
+
+// ── Hardware pins ────────────────────────────────────────────────────
+#define PIN_LED_GREEN     13   // green LED  – attendance accepted
+#define PIN_LED_RED       26   // red LED    – unknown card / duplicate
+#define PIN_LED_BLUE      14   // blue LED   – network busy
+#define PIN_BUZZER        25   // passive buzzer (tone()), 100 Ω series
+#define PIN_BUTTON_RESET   4   // attendance-reset button, wired active-LOW
+#define PIN_RFID_SS        5   // MFRC522 SDA/SS
+#define PIN_RFID_RST      27   // MFRC522 RST (NOT GPIO21 – that's OLED SDA)
+#define PIN_RFID_SCK      18
+#define PIN_RFID_MISO     19
+#define PIN_RFID_MOSI     23
+#define PIN_OLED_SDA      21
+#define PIN_OLED_SCL      22
+
+// ── OLED ─────────────────────────────────────────────────────────────
+#define OLED_SCREEN_WIDTH    128
+#define OLED_SCREEN_HEIGHT    64
+#define OLED_RESET_PIN        -1     // shares the ESP32 reset line
+#define OLED_I2C_ADDRESS    0x3C
+#define OLED_I2C_ADDRESS_ALT 0x3D
+
+// ── Timing (milliseconds unless noted) ───────────────────────────────
+#define WIFI_CONNECT_TIMEOUT_MS   15000
+#define HTTP_REQUEST_TIMEOUT_MS    8000
+#define TLS_HANDSHAKE_TIMEOUT_MS  15000
+#define RESULT_DISPLAY_MS           900
+#define SUCCESS_DISPLAY_MS          900
+#define SUCCESS_BEEP_HOLD_MS        150
+#define ERROR_BEEP_HOLD_MS          200
+#define RESET_HOLD_MS              3000
+#define BUTTON_RELEASE_WAIT_MS     5000
+#define SAME_CARD_COOLDOWN_MS      3000
+#define SUMMARY_DISPLAY_MS         3000
+#define BUTTON_DEBOUNCE_MS           40
+#define SYNC_QUEUE_LENGTH             4
+#define OUTBOX_CAPACITY              60
+#define UPLOAD_RETRY_MIN_MS        2000
+#define UPLOAD_RETRY_MAX_MS       60000
+#define WIFI_RECHECK_MS           20000
+#define RESULT_BANNER_WINDOW_MS   20000
+#define DAY_CHECK_INTERVAL_MS      1000
+#define CLOCK_SYNC_WAIT_MS         5000
+#define READER_POLL_MS               40
+#define READER_HEALTH_CHECK_MS     5000
+#define ENROLL_WINDOW_MS          15000
+
+// ── Roster / UID limits ───────────────────────────────────────────────
+#define MAX_STUDENTS   20
+#define MAX_UID_LENGTH 15
+
+// ── Buzzer tones ──────────────────────────────────────────────────────
+#define TONE_SUCCESS_HZ  1500
+#define TONE_SUCCESS_MS   150
+#define TONE_ERROR_HZ     500
+#define TONE_ERROR_MS     400
+#define TONE_WIFI_OK_HZ  2000
+#define TONE_WIFI_OK_MS   100
+
+// ── NTP / Timezone ────────────────────────────────────────────────────
+// India Standard Time (UTC+5:30, no DST).  Change if needed, e.g.:
+//   "UTC0"  |  "EST5EDT,M3.2.0,M11.1.0"  |  "GMT0BST,M3.5.0/1,M10.5.0"
+#define TZ_INFO       "IST-5:30"
+#define NTP_SERVER_1  "pool.ntp.org"
+#define NTP_SERVER_2  "time.google.com"
+
+// Anything before Nov 2023 means the clock hasn't been set yet.
+#define MIN_VALID_EPOCH 1700000000UL
+
+// =====================================================================
+// SECTION 1 – LIBRARY INCLUDES
+// =====================================================================
+#include <Arduino.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <Preferences.h>
+#include <time.h>
+#include <string.h>
+#include <MFRC522.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+
+// =====================================================================
+// SECTION 2 – TIME UTILITIES  (was TimeUtil.h)
+// =====================================================================
+inline bool isClockValid(time_t t) {
+  return t >= (time_t)MIN_VALID_EPOCH;
+}
+
+// Local calendar day as yyyymmdd, e.g. 20261027.
+// Used to detect midnight rollover.
+inline int dayKey(time_t t) {
+  struct tm tmLocal;
+  localtime_r(&t, &tmLocal);
+  return (tmLocal.tm_year + 1900) * 10000
+       + (tmLocal.tm_mon  + 1)   * 100
+       +  tmLocal.tm_mday;
+}
+
+// =====================================================================
+// SECTION 3 – BACKEND RESPONSE CLASSIFIER  (was BackendResponse.h/cpp)
+// =====================================================================
+enum class BackendAction {
+  DELIVERED,  // sheet has this record (new row OR already there today)
+  DROP,       // server will never accept it – retrying is pointless
+  RETRY       // not delivered; keep queued and try again later
+};
+
+BackendAction classifyBackendResponse(int httpCode, const char* body) {
+  if (httpCode < 200 || httpCode >= 300) return BackendAction::RETRY;
+  if (body == nullptr) return BackendAction::RETRY;
+
+  // Skip leading whitespace / CR / LF
+  while (*body == ' ' || *body == '\r' || *body == '\n') body++;
+
+  if (strncmp(body, "Success",   7) == 0) return BackendAction::DELIVERED;
+  if (strncmp(body, "Duplicate", 9) == 0) return BackendAction::DELIVERED;
+
+  // Missing uid/name – a structural bug; retrying won't fix it.
+  if (strncmp(body, "Error: Missing uid or name", 26) == 0)
+    return BackendAction::DROP;
+
+  // Everything else (bad API key, server busy, HTML error page, empty) →
+  // keep the record and try later.
+  return BackendAction::RETRY;
+}
+
+// =====================================================================
+// SECTION 4 – STUDENT DATABASE  (was StudentDatabase.h/cpp)
+// =====================================================================
+struct Student {
+  String uid;     // uppercase hex, no separators, e.g. "01020304"
+  String name;
+  bool   logged;  // true once the student has been marked present today
+};
+
+enum class LookupResult {
+  UNKNOWN_CARD,   // UID not in roster
+  ALREADY_LOGGED, // valid student, already marked present today
+  NEW_ENTRY       // valid student, first tap today -> mark them present
+};
+
+// ── Private helpers ───────────────────────────────────────────────────
+namespace db_internal {
+
+String slotKey(char kind, int slot) {
+  return String(kind) + String(slot);
+}
+
+String normalizeUid(const String& in) {
+  String out;
+  for (unsigned i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == ':' || c == '-' || c == ' ' || c == '\t') continue;
+    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+    out += c;
+  }
+  return out;
+}
+
+bool isHexString(const String& s) {
+  for (unsigned i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'))) return false;
+  }
+  return true;
+}
+
+} // namespace db_internal
+
+// ── Class ─────────────────────────────────────────────────────────────
+class StudentDatabase {
+public:
+  StudentDatabase(Student* roster, int initialCount, int capacity)
+    : _roster(roster), _count(initialCount),
+      _initialCount(initialCount), _capacity(capacity) {}
+
+  void begin() {
+    _rosterPrefs.begin("roster", false);
+    _rosterSlots = _rosterPrefs.getInt("cnt", 0);
+    for (int i = 0; i < _rosterSlots && _count < _capacity; i++) {
+      String uid  = _rosterPrefs.getString(db_internal::slotKey('u', i).c_str(), "");
+      String name = _rosterPrefs.getString(db_internal::slotKey('m', i).c_str(), "");
+      if (uid.length() == 0 || name.length() == 0) continue;
+      int existing;
+      if (lookup(uid, existing) != LookupResult::UNKNOWN_CARD) continue;
+      _roster[_count] = {uid, name, false};
+      _count++;
+    }
+    _attendancePrefs.begin("attendance", false);
+    _savedDay    = _attendancePrefs.getInt("_day", 0);
+    _dayConfirmed = false;
+  }
+
+  void resetAttendance() {
+    _attendancePrefs.clear();
+    if (_savedDay != 0) _attendancePrefs.putInt("_day", _savedDay);
+    for (int i = 0; i < _count; i++) _roster[i].logged = false;
+  }
+
+  // Returns true if attendance was cleared (new day or first valid clock).
+  bool rolloverIfNewDay(int todayKey) {
+    if (_dayConfirmed) {
+      if (_savedDay == todayKey) return false;
+      resetAttendance();
+      saveDay(todayKey);
+      return true;
+    }
+    _dayConfirmed = true;
+    if (_savedDay == todayKey) {
+      for (int i = 0; i < _count; i++) {
+        if (_attendancePrefs.getBool(_roster[i].uid.c_str(), false))
+          _roster[i].logged = true;
+      }
+      return false;
+    }
+    // Saved flags are from another day – discard them, keep taps from this power-on.
+    bool clearedAny = false;
+    for (int i = 0; i < _count; i++) {
+      if (!_roster[i].logged && _attendancePrefs.getBool(_roster[i].uid.c_str(), false))
+        clearedAny = true;
+    }
+    _attendancePrefs.clear();
+    for (int i = 0; i < _count; i++) {
+      if (_roster[i].logged) _attendancePrefs.putBool(_roster[i].uid.c_str(), true);
+    }
+    saveDay(todayKey);
+    return clearedAny;
+  }
+
+  LookupResult lookup(const String& uid, int& outIndex) const {
+    for (int i = 0; i < _count; i++) {
+      if (_roster[i].uid == uid) {
+        outIndex = i;
+        return _roster[i].logged ? LookupResult::ALREADY_LOGGED
+                                 : LookupResult::NEW_ENTRY;
+      }
+    }
+    outIndex = -1;
+    return LookupResult::UNKNOWN_CARD;
+  }
+
+  void markLogged(int index) {
+    if (index >= 0 && index < _count) {
+      _roster[index].logged = true;
+      _attendancePrefs.putBool(_roster[index].uid.c_str(), true);
+    }
+  }
+
+  bool enroll(const String& uidIn, const String& nameIn, String& outError) {
+    String uid  = db_internal::normalizeUid(uidIn);
+    String name = nameIn;
+    name.trim();
+
+    if (uid.length() == 0)            { outError = "UID cannot be blank"; return false; }
+    if (uid.length() > MAX_UID_LENGTH) { outError = "UID too long (max " + String(MAX_UID_LENGTH) + " chars)"; return false; }
+    if (!db_internal::isHexString(uid) || (uid.length() != 8 && uid.length() != 14))
+      { outError = "UID must be 8 or 14 hex digits"; return false; }
+    if (name.length() == 0)           { outError = "Name cannot be blank"; return false; }
+    if (isFull())                      { outError = "Roster full (" + String(_capacity) + " max)"; return false; }
+    int existing;
+    if (lookup(uid, existing) != LookupResult::UNKNOWN_CARD)
+      { outError = "UID already enrolled as " + _roster[existing].name; return false; }
+
+    int slot = _rosterSlots;
+    _rosterPrefs.putString(db_internal::slotKey('u', slot).c_str(), uid);
+    _rosterPrefs.putString(db_internal::slotKey('m', slot).c_str(), name);
+    _rosterPrefs.putInt("cnt", slot + 1);
+    _rosterSlots = slot + 1;
+
+    _roster[_count] = {uid, name, false};
+    _count++;
+    return true;
+  }
+
+  bool remove(const String& uidIn, String& outName, String& outError) {
+    String uid = db_internal::normalizeUid(uidIn);
+    int index;
+    if (lookup(uid, index) == LookupResult::UNKNOWN_CARD)
+      { outError = "No student with UID " + uid; return false; }
+    if (index < _initialCount)
+      { outError = "Built-in student (edit main code)"; return false; }
+
+    for (int slot = 0; slot < _rosterSlots; slot++) {
+      if (_rosterPrefs.getString(db_internal::slotKey('u', slot).c_str(), "") == uid) {
+        _rosterPrefs.remove(db_internal::slotKey('u', slot).c_str());
+        _rosterPrefs.remove(db_internal::slotKey('m', slot).c_str());
+      }
+    }
+    _attendancePrefs.remove(uid.c_str());
+
+    outName = _roster[index].name;
+    for (int i = index; i < _count - 1; i++) _roster[i] = _roster[i + 1];
+    _count--;
+    _roster[_count] = Student();
+
+    if (_count == _initialCount) { _rosterPrefs.clear(); _rosterSlots = 0; }
+    return true;
+  }
+
+  const Student& at(int index) const { return _roster[index]; }
+  int  count()        const { return _count; }
+  int  capacity()     const { return _capacity; }
+  bool isFull()       const { return _count >= _capacity; }
+  bool dayConfirmed() const { return _dayConfirmed; }
+  int  countPresent() const {
+    int n = 0;
+    for (int i = 0; i < _count; i++) if (_roster[i].logged) n++;
+    return n;
+  }
+
+private:
+  void saveDay(int key) {
+    _savedDay = key;
+    _attendancePrefs.putInt("_day", key);
+  }
+
+  Student*    _roster;
+  int         _count, _initialCount, _capacity;
+  int         _rosterSlots = 0;
+  int         _savedDay    = 0;
+  bool        _dayConfirmed = false;
+  Preferences _attendancePrefs;
+  Preferences _rosterPrefs;
+};
+
+// =====================================================================
+// SECTION 5 – OUTBOX  (was Outbox.h/cpp)
+// =====================================================================
+struct OutboxEntry {
+  char     uid[MAX_UID_LENGTH + 1];
+  uint32_t ts;   // Unix time of the tap (0 if clock wasn't set)
+};
+
+class Outbox {
+public:
+  void begin() {
+    _count = 0;
+    _prefs.begin("outbox", false);
+    size_t bytes = _prefs.getBytesLength("q");
+    if (bytes > 0 && bytes % sizeof(OutboxEntry) == 0 && bytes <= sizeof(_items)) {
+      _prefs.getBytes("q", _items, bytes);
+      _count = (int)(bytes / sizeof(OutboxEntry));
+      for (int i = 0; i < _count; i++) _items[i].uid[MAX_UID_LENGTH] = '\0';
+    }
+  }
+
+  bool push(const String& uid, uint32_t ts) {
+    if (full()) return false;
+    OutboxEntry& e = _items[_count++];
+    memset(&e, 0, sizeof(e));
+    strncpy(e.uid, uid.c_str(), MAX_UID_LENGTH);
+    e.ts = ts;
+    if (!save()) {
+      _count--;
+      memset(&_items[_count], 0, sizeof(OutboxEntry));
+      return false;
+    }
+    return true;
+  }
+
+  bool popIfFront(const char* uid, uint32_t ts) {
+    if (_count == 0) return false;
+    if (strcmp(_items[0].uid, uid) != 0 || _items[0].ts != ts) return false;
+    OutboxEntry delivered = _items[0];
+    memmove(&_items[0], &_items[1], (size_t)(_count - 1) * sizeof(OutboxEntry));
+    _count--;
+    if (!save()) {
+      memmove(&_items[1], &_items[0], (size_t)_count * sizeof(OutboxEntry));
+      _items[0] = delivered;
+      _count++;
+      return false;
+    }
+    return true;
+  }
+
+  bool              empty() const { return _count == 0; }
+  bool              full()  const { return _count >= OUTBOX_CAPACITY; }
+  int               size()  const { return _count; }
+  const OutboxEntry& front() const { return _items[0]; }
+
+private:
+  bool save() {
+    if (_count == 0)
+      return _prefs.remove("q") || _prefs.getBytesLength("q") == 0;
+    size_t bytes = (size_t)_count * sizeof(OutboxEntry);
+    return _prefs.putBytes("q", _items, bytes) == bytes;
+  }
+
+  OutboxEntry _items[OUTBOX_CAPACITY];
+  int         _count = 0;
+  Preferences _prefs;
+};
+
+// =====================================================================
+// SECTION 6 – DISPLAY UI  (was DisplayUI.h/cpp)
+// =====================================================================
+class DisplayUI {
+public:
+  DisplayUI() : _display(OLED_SCREEN_WIDTH, OLED_SCREEN_HEIGHT, &Wire, OLED_RESET_PIN) {}
+
+  bool begin() {
+    Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
+    const uint8_t candidates[] = {OLED_I2C_ADDRESS, OLED_I2C_ADDRESS_ALT};
+    _address = 0;
+    for (uint8_t addr : candidates) {
+      Wire.beginTransmission(addr);
+      if (Wire.endTransmission() == 0) { _address = addr; break; }
+    }
+    if (_address == 0) { _ok = false; return false; }
+    _ok = _display.begin(SSD1306_SWITCHCAPVCC, _address);
+    if (_ok) _display.cp437(true);
+    return _ok;
+  }
+
+  // Shows a 4-line layout: title + underline + three content lines.
+  // Long strings are clipped so they never overflow into the next line.
+  void showMessage(const String& title, const String& line1,
+                   const String& line2, const String& line3) {
+    if (!_ok) return;
+    const unsigned kMax = OLED_SCREEN_WIDTH / 6;  // 21 chars at text size 1
+    _display.clearDisplay();
+    _display.setTextColor(SSD1306_WHITE);
+    _display.setTextSize(1);
+    _display.setTextWrap(false);
+
+    _display.setCursor(0, 0);
+    _display.print(title.length() > kMax ? title.substring(0, kMax) : title);
+    _display.drawLine(0, 10, OLED_SCREEN_WIDTH, 10, SSD1306_WHITE);
+
+    _display.setCursor(0, 16);
+    _display.print(line1.length() > kMax ? line1.substring(0, kMax) : line1);
+    _display.setCursor(0, 32);
+    _display.print(line2.length() > kMax ? line2.substring(0, kMax) : line2);
+    _display.setCursor(0, 48);
+    _display.print(line3.length() > kMax ? line3.substring(0, kMax) : line3);
+
+    _display.display();
+  }
+
+  void showReady(bool wifiConnected, int pendingUploads, bool readerOk) {
+    String line3;
+    if (!readerOk)           line3 = "RFID: check wiring!";
+    else if (pendingUploads) line3 = "Unsynced: " + String(pendingUploads);
+    showMessage("SYSTEM READY",
+                wifiConnected ? "Wi-Fi: Connected" : "Wi-Fi: Offline",
+                "Tap your ID Card", line3);
+  }
+
+  bool    available() const { return _ok; }
+  uint8_t address()   const { return _address; }
+
+private:
+  Adafruit_SSD1306 _display;
+  bool    _ok      = false;
+  uint8_t _address = 0;
+};
+
+// =====================================================================
+// SECTION 7 – FEEDBACK INDICATORS  (was FeedbackIndicators.h/cpp)
+// =====================================================================
+class FeedbackIndicators {
+public:
+  void begin() {
+    pinMode(PIN_LED_GREEN, OUTPUT); digitalWrite(PIN_LED_GREEN, LOW);
+    pinMode(PIN_LED_RED,   OUTPUT); digitalWrite(PIN_LED_RED,   LOW);
+    pinMode(PIN_LED_BLUE,  OUTPUT); digitalWrite(PIN_LED_BLUE,  LOW);
+    pinMode(PIN_BUZZER,    OUTPUT);
+  }
+
+  void success() {
+    digitalWrite(PIN_LED_GREEN, HIGH);
+    tone(PIN_BUZZER, TONE_SUCCESS_HZ, TONE_SUCCESS_MS);
+    _state = HoldState::SUCCESS_HOLD;
+    _holdStartMs = millis();
+  }
+
+  void error() {
+    digitalWrite(PIN_LED_RED, HIGH);
+    tone(PIN_BUZZER, TONE_ERROR_HZ, TONE_ERROR_MS);
+    _state = HoldState::ERROR_HOLD;
+    _holdStartMs = millis();
+  }
+
+  void wifiConnected() {
+    tone(PIN_BUZZER, TONE_WIFI_OK_HZ, TONE_WIFI_OK_MS);
+  }
+
+  void networkBusy(bool on) {
+    digitalWrite(PIN_LED_BLUE, on ? HIGH : LOW);
+  }
+
+  void selfTest() {
+    const int leds[] = {PIN_LED_GREEN, PIN_LED_RED, PIN_LED_BLUE};
+    for (int pin : leds) {
+      digitalWrite(pin, HIGH); delay(350); digitalWrite(pin, LOW);
+    }
+    tone(PIN_BUZZER, TONE_SUCCESS_HZ, 200); delay(300);
+    tone(PIN_BUZZER, TONE_ERROR_HZ,   300); delay(400);
+    _state = HoldState::IDLE;
+  }
+
+  // Call once per loop() – turns off timed LEDs without blocking.
+  void update() {
+    if (_state == HoldState::IDLE) return;
+    unsigned long holdMs = (_state == HoldState::SUCCESS_HOLD)
+                         ? SUCCESS_BEEP_HOLD_MS : ERROR_BEEP_HOLD_MS;
+    if (millis() - _holdStartMs >= holdMs) {
+      digitalWrite(PIN_LED_GREEN, LOW);
+      digitalWrite(PIN_LED_RED,   LOW);
+      _state = HoldState::IDLE;
+    }
+  }
+
+private:
+  enum class HoldState { IDLE, SUCCESS_HOLD, ERROR_HOLD };
+  HoldState     _state       = HoldState::IDLE;
+  unsigned long _holdStartMs = 0;
+};
+
+// =====================================================================
+// SECTION 8 – ATTENDANCE LOGGER  (was AttendanceLogger.h/cpp)
+//
+// Owns Wi-Fi, the NTP clock, and the HTTPS upload to Google Sheets.
+// Uploads run on a FreeRTOS task pinned to core 0 so core 1 (loop) stays
+// fully responsive for RFID polling even during a slow TLS handshake.
+// =====================================================================
+
+// POD struct delivered from the background task back to loop() through a
+// FreeRTOS queue.  Must NOT contain Arduino String members (raw memcpy).
+struct SyncOutcome {
+  BackendAction action;
+  int     httpCode;
+  uint32_t ts;
+  char    uid[24];
+  char    message[96];
+};
+
+// ── URL-encode helper (file-local) ────────────────────────────────────
+namespace al_internal {
+
+String urlEncode(const String& value) {
+  String encoded;
+  const char* hex = "0123456789ABCDEF";
+  for (size_t i = 0; i < value.length(); i++) {
+    unsigned char c = (unsigned char)value[i];
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      encoded += (char)c;
+    } else {
+      encoded += '%';
+      encoded += hex[(c >> 4) & 0xF];
+      encoded += hex[c & 0xF];
+    }
+  }
+  return encoded;
+}
+
+void copyTruncated(const String& src, char* dest, size_t destSize) {
+  size_t n = src.length();
+  if (n >= destSize) n = destSize - 1;
+  memcpy(dest, src.c_str(), n);
+  dest[n] = '\0';
+}
+
+// One HTTPS GET to the Apps Script.
+// Returns HTTPClient code (negative = connection / TLS failure).
+int attemptSync(const String& uid, const String& name, uint32_t ts, String& outBody) {
+  WiFiClientSecure client;
+  client.setInsecure();                                  // skip cert validation
+  client.setTimeout(HTTP_REQUEST_TIMEOUT_MS / 1000);
+  client.setHandshakeTimeout(TLS_HANDSHAKE_TIMEOUT_MS / 1000);
+
+  HTTPClient http;
+  http.setConnectTimeout(HTTP_REQUEST_TIMEOUT_MS);
+  http.setTimeout(HTTP_REQUEST_TIMEOUT_MS);
+
+  String url = String(GOOGLE_SCRIPT_URL)
+             + "?uid="  + urlEncode(uid)
+             + "&name=" + urlEncode(name)
+             + "&key="  + urlEncode(API_KEY);
+  if (ts > 0) url += "&ts=" + String(ts);
+
+  if (!http.begin(client, url)) { outBody = "Could not open connection"; return 0; }
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);  // follow the GAS 302
+
+  int code = http.GET();
+  outBody = (code > 0) ? http.getString() : String("Connection failed");
+  http.end();
+  return code;
+}
+
+} // namespace al_internal
+
+// ── Class ─────────────────────────────────────────────────────────────
+class AttendanceLogger {
+public:
+  bool connect() {
+    WiFi.persistent(false);
+    WiFi.setAutoReconnect(true);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED &&
+           millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
+      delay(400); Serial.print(".");
+    }
+    maintain();
+    return isConnected();
+  }
+
+  bool        isConnected() const { return WiFi.status() == WL_CONNECTED; }
+  const char* ssid()        const { return WIFI_SSID; }
+  bool        busy()        const { return _busy; }
+
+  void beginAsync() {
+    _resultQueue = xQueueCreate(SYNC_QUEUE_LENGTH, sizeof(SyncOutcome));
+    if (!_resultQueue)
+      Serial.println("[SYNC] WARNING: failed to create result queue – uploads disabled.");
+  }
+
+  void maintain() {
+    unsigned long now = millis();
+    if (!isConnected()) {
+      if (now - _lastWifiNudgeMs >= WIFI_RECHECK_MS) {
+        _lastWifiNudgeMs = now;
+        WiFi.reconnect();
+      }
+      return;
+    }
+    if (!_timeStarted) {
+      configTzTime(TZ_INFO, NTP_SERVER_1, NTP_SERVER_2);
+      _timeStarted = true;
+    }
+  }
+
+  bool startUpload(const String& uid, const String& name, uint32_t ts) {
+    if (_busy || !_resultQueue || !isConnected()) return false;
+    SyncJob* job = new SyncJob{uid, name, ts, this};
+    _busy = true;
+    BaseType_t ok =
+        xTaskCreatePinnedToCore(syncTaskEntry, "cloudSync", 20480, job, 1, nullptr, 0);
+    if (ok != pdPASS) {
+      Serial.println("[SYNC] Failed to start upload task (out of memory?).");
+      delete job; _busy = false; return false;
+    }
+    return true;
+  }
+
+  bool pollResult(SyncOutcome& out) {
+    if (!_resultQueue) return false;
+    if (xQueueReceive(_resultQueue, &out, 0) != pdTRUE) return false;
+    _busy = false;
+    return true;
+  }
+
+private:
+  struct SyncJob { String uid, name; uint32_t ts; AttendanceLogger* self; };
+
+  static void syncTaskEntry(void* param) {
+    SyncJob* job = static_cast<SyncJob*>(param);
+    SyncOutcome outcome = job->self->doSync(job->uid, job->name, job->ts);
+    xQueueSend(job->self->_resultQueue, &outcome, pdMS_TO_TICKS(200));
+    delete job;
+    vTaskDelete(nullptr);
+  }
+
+  SyncOutcome doSync(const String& uid, const String& name, uint32_t ts) {
+    SyncOutcome outcome{};
+    outcome.ts = ts;
+    al_internal::copyTruncated(uid, outcome.uid, sizeof(outcome.uid));
+
+    const int kMaxAttempts = 3;
+    String body; int code = 0;
+    for (int attempt = 1; attempt <= kMaxAttempts; attempt++) {
+      body = "";
+      code = al_internal::attemptSync(uid, name, ts, body);
+      if (code > 0) break;
+      if (attempt < kMaxAttempts) {
+        Serial.printf("[SYNC] Attempt %d failed (code %d), retrying...\n", attempt, code);
+        vTaskDelay(pdMS_TO_TICKS(400 * attempt));
+      }
+    }
+    outcome.httpCode = code;
+    al_internal::copyTruncated(body, outcome.message, sizeof(outcome.message));
+    outcome.action = classifyBackendResponse(code, body.c_str());
+    return outcome;
+  }
+
+  QueueHandle_t    _resultQueue    = nullptr;
+  volatile bool    _busy           = false;
+  bool             _timeStarted    = false;
+  unsigned long    _lastWifiNudgeMs = 0;
+};
+
+// =====================================================================
+// SECTION 9 – GLOBAL OBJECTS
+// =====================================================================
+Student         roster[MAX_STUDENTS];
+
+MFRC522         rfid(PIN_RFID_SS, PIN_RFID_RST);
+DisplayUI       oled;
+FeedbackIndicators feedback;
+AttendanceLogger   cloud;
+StudentDatabase    students(roster, 0, MAX_STUDENTS);
+Outbox             outbox;
+
+// ── Screen state (no delay() – times out with millis()) ───────────────
+enum class ScreenState { READY, MESSAGE };
+ScreenState   screenState   = ScreenState::READY;
+unsigned long messageShownAt = 0;
+unsigned long messageHoldMs  = 0;
+
+// Cache what the ready screen last showed → redraw only on change.
+bool shownWifi     = false;
+int  shownPending  = -1;
+bool shownReaderOk = true;
+
+bool readerOk           = true;
+unsigned long lastReaderCheckMs = 0;
+unsigned long lastReaderPollMs  = 0;
+unsigned long lastDayCheckMs    = 0;
+
+// Same-card debounce
+String        lastScannedUid;
+unsigned long lastScanMs = 0;
+
+// Upload retry backoff
+int           uploadFailures = 0;
+unsigned long nextUploadAt   = 0;
+
+// ENROLL mode
+String        enrollName;
+unsigned long enrollDeadline = 0;
+bool          enrollArmed    = false;
+
+// Reset-button state
+bool          buttonWasDown = false;
+unsigned long buttonDownAt  = 0;
+
+// =====================================================================
+// SECTION 10 – HELPER FUNCTIONS
+// =====================================================================
+uint32_t nowEpoch() {
+  time_t t = time(nullptr);
+  return isClockValid(t) ? (uint32_t)t : 0;
+}
+
+String readCardUID() {
+  String uid;
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    if (rfid.uid.uidByte[i] < 0x10) uid += '0';
+    uid += String(rfid.uid.uidByte[i], HEX);
+  }
+  uid.toUpperCase();
+  return uid;
+}
+
+byte readerVersion()  { return rfid.PCD_ReadRegister(MFRC522::VersionReg); }
+bool readerResponds() { byte v = readerVersion(); return v != 0x00 && v != 0xFF; }
+
+void drawReady() {
+  oled.showReady(cloud.isConnected(), outbox.size(), readerOk);
+  shownWifi     = cloud.isConnected();
+  shownPending  = outbox.size();
+  shownReaderOk = readerOk;
+  screenState   = ScreenState::READY;
+}
+
+void showTimedMessage(const String& title, const String& line1,
+                      const String& line2, const String& line3,
+                      unsigned long holdMs) {
+  oled.showMessage(title, line1, line2, line3);
+  screenState    = ScreenState::MESSAGE;
+  messageShownAt = millis();
+  messageHoldMs  = holdMs;
+}
+
+// ── Serial console helpers ────────────────────────────────────────────
+void printHelp() {
+  Serial.println(F("\n--- Commands ---"));
+  Serial.println(F("ENROLL <Name>      Enroll a card: type this, then tap the card"));
+  Serial.println(F("ADD <UID> <Name>   Enroll by typing the UID, e.g. ADD 3F2A9B10 Priya"));
+  Serial.println(F("REMOVE <UID>       Un-enroll a student"));
+  Serial.println(F("LIST               Show the roster"));
+  Serial.println(F("STATUS             Wi-Fi, clock, upload queue, reader, memory"));
+  Serial.println(F("SELFTEST           Blink LEDs, beep, check the RFID reader"));
+  Serial.println(F("RESET              Wipe today's attendance (enrolled students stay)"));
+  Serial.println(F("HELP               Show this message"));
+}
+
+void printRoster() {
+  Serial.printf("\n--- Roster (%d/%d enrolled, %d present) ---\n",
+                students.count(), students.capacity(), students.countPresent());
+  for (int i = 0; i < students.count(); i++) {
+    const Student& s = students.at(i);
+    Serial.printf("%2d. %-16s %-20s %s\n",
+                  i, s.uid.c_str(), s.name.c_str(), s.logged ? "PRESENT" : "-");
+  }
+  if (!students.dayConfirmed())
+    Serial.println(F("(Clock not set yet – flags may be from a previous session.)"));
+}
+
+void printStatus() {
+  Serial.println(F("\n--- Status ---"));
+  Serial.printf("Wi-Fi     : %s", cloud.isConnected() ? "connected" : "OFFLINE");
+  if (cloud.isConnected())
+    Serial.printf(" (%s, %d dBm)", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  Serial.println();
+  uint32_t epoch = nowEpoch();
+  if (epoch) {
+    time_t t = (time_t)epoch; char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", localtime(&t));
+    Serial.printf("Clock     : %s (%s)\n", buf, TZ_INFO);
+  } else {
+    Serial.println(F("Clock     : not set yet (waiting for NTP)"));
+  }
+  Serial.printf("Day       : %s\n", students.dayConfirmed()
+                ? "confirmed – present flags are today's"
+                : "NOT confirmed – earlier taps not counted yet");
+  Serial.printf("Unsynced  : %d tap(s) queued\n", outbox.size());
+  Serial.printf("Present   : %d / %d\n", students.countPresent(), students.count());
+  Serial.printf("RFID      : version 0x%02X (%s)\n", readerVersion(),
+                readerResponds() ? "OK" : "NOT RESPONDING – check wiring");
+  if (oled.available())
+    Serial.printf("OLED      : OK (I2C 0x%02X)\n", oled.address());
+  else
+    Serial.println(F("OLED      : not found (0x3C / 0x3D)"));
+  Serial.printf("Free heap : %u bytes (largest block %u)   Uptime: %lu s\n",
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
+                millis() / 1000UL);
+}
+
+void runSelfTest() {
+  Serial.println(F("\n--- Self test ---"));
+  oled.showMessage("SELF TEST", "LEDs + buzzer...", "", "");
+  feedback.selfTest();
+  bool ok = readerResponds();
+  Serial.printf("RFID reader : version 0x%02X -> %s\n", readerVersion(),
+                ok ? "OK" : "NOT RESPONDING (check SDA/SCK/MOSI/MISO/RST/3.3V)");
+  Serial.printf("OLED        : %s\n", oled.available() ? "OK" : "not found");
+  showTimedMessage("SELF TEST",
+                   ok ? "RFID reader: OK" : "RFID reader: FAIL",
+                   oled.available() ? "OLED: OK" : "",
+                   "See Serial monitor", 2500);
+}
+
+void enrollAndReport(const String& uid, const String& name, const char* via) {
+  String err;
+  if (students.enroll(uid, name, err)) {
+    Serial.printf("[ENROLL] %s -> \"%s\" (%d/%d)\n",
+                  uid.c_str(), name.c_str(), students.count(), students.capacity());
+    showTimedMessage("STUDENT ADDED", name, "UID: " + uid, via, SUCCESS_DISPLAY_MS * 2);
+    feedback.success();
+  } else {
+    Serial.printf("[ENROLL] Failed: %s\n", err.c_str());
+    showTimedMessage("ENROLL FAILED", err, "", "", RESULT_DISPLAY_MS * 2);
+    feedback.error();
+  }
+}
+
+void handleSerialCommand(String line) {
+  line.trim();
+  if (line.length() == 0) return;
+  String upper = line; upper.toUpperCase();
+
+  if      (upper == "HELP")     printHelp();
+  else if (upper == "LIST")     printRoster();
+  else if (upper == "STATUS")   printStatus();
+  else if (upper == "SELFTEST") runSelfTest();
+  else if (upper == "RESET") {
+    students.resetAttendance();
+    Serial.println(F("[RESET] Today's attendance wiped."));
+    showTimedMessage("ATTENDANCE RESET", "All records wiped", "", "", SUCCESS_DISPLAY_MS * 2);
+    feedback.success();
+  }
+  else if (upper == "ENROLL" || upper == "ADD" || upper == "REMOVE") {
+    Serial.println(F("[?] That command needs more – type HELP for the format."));
+  }
+  else if (upper.startsWith("ENROLL ")) {
+    String name = line.substring(7); name.trim();
+    if (name.length() == 0) {
+      Serial.println(F("[ENROLL] Usage: ENROLL <Name>, then tap the card"));
+    } else {
+      enrollName    = name;
+      enrollArmed   = true;
+      enrollDeadline = millis() + ENROLL_WINDOW_MS;
+      Serial.printf("[ENROLL] Tap the card for \"%s\" within %d s...\n",
+                    name.c_str(), ENROLL_WINDOW_MS / 1000);
+      showTimedMessage("ENROLL MODE", name, "Tap the new card", "now...", ENROLL_WINDOW_MS);
+    }
+  }
+  else if (upper.startsWith("ADD ")) {
+    String rest = line.substring(4); rest.trim();
+    int sep = rest.indexOf(' ');
+    if (sep < 0) {
+      Serial.println(F("[ADD] Usage: ADD <UID> <Name>"));
+    } else {
+      String name = rest.substring(sep + 1); name.trim();
+      enrollAndReport(rest.substring(0, sep), name, "via Serial");
+    }
+  }
+  else if (upper.startsWith("REMOVE ")) {
+    String uid = line.substring(7); uid.trim();
+    String name, err;
+    if (students.remove(uid, name, err)) {
+      Serial.printf("[REMOVE] \"%s\" un-enrolled (%d/%d)\n",
+                    name.c_str(), students.count(), students.capacity());
+      showTimedMessage("STUDENT REMOVED", name, "UID: " + uid, "", SUCCESS_DISPLAY_MS * 2);
+      feedback.success();
+    } else {
+      Serial.printf("[REMOVE] Failed: %s\n", err.c_str());
+      feedback.error();
+    }
+  }
+  else {
+    Serial.println(F("[?] Unknown command. Type HELP."));
+  }
+}
+
+void pollSerialCommands() {
+  static String buffer;
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if      (c == '\n') { handleSerialCommand(buffer); buffer = ""; }
+    else if (c == '\b' || c == 0x7F) { if (buffer.length()) buffer.remove(buffer.length()-1); }
+    else if (c != '\r') {
+      buffer += c;
+      if (buffer.length() > 96) buffer = "";
+    }
+  }
+}
+
+void pollResetButton() {
+  bool down = (digitalRead(PIN_BUTTON_RESET) == LOW);
+  if (down && !buttonWasDown) {
+    buttonWasDown = true; buttonDownAt = millis();
+  } else if (!down && buttonWasDown) {
+    buttonWasDown = false;
+    unsigned long heldMs = millis() - buttonDownAt;
+    if (heldMs >= BUTTON_DEBOUNCE_MS && heldMs < RESET_HOLD_MS) {
+      showTimedMessage("ATTENDANCE",
+                        "Present: " + String(students.countPresent()) +
+                        " / " + String(students.count()),
+                        outbox.size() > 0 ? "Unsynced: " + String(outbox.size()) : "",
+                        "Tap ID card", SUMMARY_DISPLAY_MS);
+    }
+  }
+}
+
+// ── Upload pump & result handler ──────────────────────────────────────
+void pumpUploads() {
+  if (cloud.busy() || outbox.empty() || !cloud.isConnected()) return;
+  if ((long)(millis() - nextUploadAt) < 0) return;
+
+  const OutboxEntry entry = outbox.front();
+  int index; String name;
+  if (students.lookup(String(entry.uid), index) != LookupResult::UNKNOWN_CARD)
+    name = students.at(index).name;
+  else
+    name = "(removed)";
+
+  if (!cloud.startUpload(String(entry.uid), name, entry.ts))
+    nextUploadAt = millis() + UPLOAD_RETRY_MIN_MS;
+}
+
+void handleUploadResult(const SyncOutcome& o) {
+  String name(o.uid);
+  int index;
+  if (students.lookup(String(o.uid), index) != LookupResult::UNKNOWN_CARD)
+    name = students.at(index).name;
+
+  String line1 = name, line2, line3;
+  const char* title;
+
+  switch (o.action) {
+    case BackendAction::DELIVERED:
+      outbox.popIfFront(o.uid, o.ts);
+      uploadFailures = 0; nextUploadAt = 0;
+      Serial.printf("[SYNC] %s: %s\n", o.uid, o.message);
+      title = "ATTENDANCE LOGGED";
+      line2  = String(o.message).startsWith("Duplicate") ? "Already in sheet" : "Status: Present";
+      line3  = "Cloud: Synced";
+      break;
+
+    case BackendAction::DROP:
+      outbox.popIfFront(o.uid, o.ts);
+      uploadFailures = 0;
+      Serial.printf("[SYNC] %s rejected, dropped: %s\n", o.uid, o.message);
+      title = "CLOUD REJECTED";
+      line2  = "Not uploaded"; line3 = "See Serial log";
+      break;
+
+    default: {  // RETRY
+      uploadFailures++;
+      unsigned long backoff = UPLOAD_RETRY_MIN_MS;
+      for (int i = 1; i < uploadFailures && backoff < UPLOAD_RETRY_MAX_MS; i++) backoff *= 2;
+      if (backoff > UPLOAD_RETRY_MAX_MS) backoff = UPLOAD_RETRY_MAX_MS;
+      nextUploadAt = millis() + backoff;
+      Serial.printf("[SYNC] %s not delivered (HTTP %d: %s) – retry in %lu s, %d queued\n",
+                    o.uid, o.httpCode, o.message, backoff / 1000UL, outbox.size());
+      title = "SAVED LOCALLY";
+      line2  = "Will sync later";
+      line3  = String(o.message).indexOf("API key") >= 0 ? "Check API key!" : "Err: " + String(o.httpCode);
+      break;
+    }
+  }
+
+  if (name.length() > 0 &&
+      String(o.uid) == lastScannedUid &&
+      (millis() - lastScanMs) < RESULT_BANNER_WINDOW_MS) {
+    showTimedMessage(title, line1, line2, line3, SUCCESS_DISPLAY_MS);
+  }
+}
+
+// ── Housekeeping ──────────────────────────────────────────────────────
+void checkReaderHealth() {
+  bool ok = readerResponds();
+  if (!ok) { rfid.PCD_Init(); ok = readerResponds(); }
+  if (ok != readerOk) {
+    readerOk = ok;
+    Serial.println(ok ? F("[RFID] Reader is responding again.")
+                      : F("[RFID] Reader NOT responding – check SDA/SCK/MOSI/MISO/RST/3.3V."));
+    if (!ok) feedback.error();
+  }
+}
+
+void checkDayRollover() {
+  uint32_t epoch = nowEpoch();
+  if (epoch == 0) return;
+  bool firstCheck = !students.dayConfirmed();
+  if (students.rolloverIfNewDay(dayKey((time_t)epoch))) {
+    Serial.println(F("[DAY] New day – earlier attendance cleared."));
+    showTimedMessage("NEW DAY", "Earlier attendance", "cleared", "Tap ID card", SUCCESS_DISPLAY_MS * 2);
+  } else if (firstCheck) {
+    Serial.println(F("[DAY] Clock set – attendance from earlier today restored."));
+  }
+}
+
+void checkConfiguration() {
+  bool ok = true;
+  String url = GOOGLE_SCRIPT_URL;
+  if (url.indexOf("YOUR_SCRIPT_ID") >= 0) {
+    Serial.println(F("[CONFIG] GOOGLE_SCRIPT_URL is still the placeholder – nothing will upload."));
+    ok = false;
+  } else if (!url.endsWith("/exec")) {
+    Serial.println(F("[CONFIG] GOOGLE_SCRIPT_URL should end with /exec."));
+    ok = false;
+  }
+  if (String(API_KEY) == "change-this-shared-secret") {
+    Serial.println(F("[CONFIG] API_KEY is still the placeholder."));
+    ok = false;
+  }
+  String ssid = WIFI_SSID;
+  if (ssid == "YOUR_WIFI_NAME" || ssid.length() == 0) {
+    Serial.println(F("[CONFIG] WIFI_SSID is a placeholder."));
+    ok = false;
+  }
+  if (String(WIFI_PASSWORD).length() > 0 && String(WIFI_PASSWORD).length() < 8) {
+    Serial.println(F("[CONFIG] WIFI_PASSWORD is shorter than 8 characters."));
+    ok = false;
+  }
+  if (!ok) {
+    oled.showMessage("CHECK CONFIG", "Setup problem –", "see Serial monitor", "");
+    feedback.error();
+    delay(3000);
+  }
+}
+
+// Hold the reset button through power-on to wipe today's attendance.
+void bootResetCheck() {
+  if (digitalRead(PIN_BUTTON_RESET) != LOW) return;
+
+  oled.showMessage("RESET ATTENDANCE", "Keep holding...", "Release to cancel", "");
+  unsigned long start = millis();
+  while (millis() - start < RESET_HOLD_MS) {
+    if (digitalRead(PIN_BUTTON_RESET) == HIGH) {
+      Serial.println(F("[SETUP] Reset cancelled (released early)."));
+      oled.showMessage("RESET CANCELLED", "Released too soon", "Nothing was wiped", "");
+      delay(1000); return;
+    }
+    delay(10);
+  }
+  oled.showMessage("RESET ATTENDANCE", "Now RELEASE the", "button to confirm", "");
+  start = millis();
+  while (digitalRead(PIN_BUTTON_RESET) == LOW) {
+    if (millis() - start >= BUTTON_RELEASE_WAIT_MS) {
+      Serial.println(F("[SETUP] Reset button never released – check wiring. Nothing wiped."));
+      oled.showMessage("BUTTON STUCK?", "Nothing was wiped", "Check wiring", "");
+      feedback.error(); delay(2500); return;
+    }
+    delay(10);
+  }
+  students.resetAttendance();
+  Serial.println(F("[SETUP] Attendance reset via button hold."));
+  oled.showMessage("ATTENDANCE RESET", "All records wiped", "Starting fresh", "session");
+  feedback.success(); delay(1500);
+}
+
+// =====================================================================
+// SECTION 11 – setup() & loop()
+// =====================================================================
+void setup() {
+  Serial.begin(115200);
+  feedback.begin();
+  students.begin();
+  outbox.begin();
+
+  pinMode(PIN_BUTTON_RESET, INPUT_PULLUP);
+
+  if (oled.begin()) {
+    Serial.printf("[SETUP] OLED found at I2C 0x%02X.\n", oled.address());
+  } else {
+    Serial.println("[WARN] OLED not found at 0x3C or 0x3D – running headless (LEDs + Serial only).");
+    feedback.error();
+  }
+
+  bootResetCheck();
+  checkConfiguration();
+
+  oled.showMessage("SMART ATTENDANCE", "Booting System...", "Please wait", "");
+
+  SPI.begin(PIN_RFID_SCK, PIN_RFID_MISO, PIN_RFID_MOSI, PIN_RFID_SS);
+  rfid.PCD_Init();
+  readerOk = readerResponds();
+  Serial.printf("[SETUP] MFRC522 version 0x%02X (%s)\n", readerVersion(),
+                readerOk ? "OK" : "NOT RESPONDING – check wiring");
+
+  feedback.networkBusy(true);
+  oled.showMessage("WI-FI CONNECTION", "Connecting to:", cloud.ssid(), "");
+  Serial.printf("[SETUP] Connecting to Wi-Fi \"%s\"", cloud.ssid());
+  bool wifiOk = cloud.connect();
+  cloud.beginAsync();
+
+  if (wifiOk) {
+    Serial.println("\n[SETUP] Wi-Fi connected.");
+    feedback.wifiConnected();
+    oled.showMessage("WI-FI CONNECTED", "Getting the time...", "", "");
+    unsigned long start = millis();
+    while (nowEpoch() == 0 && millis() - start < CLOCK_SYNC_WAIT_MS) delay(100);
+    Serial.println(nowEpoch() ? "[SETUP] Clock set via NTP." : "[SETUP] Clock not set yet.");
+  } else {
+    Serial.println("\n[SETUP] Wi-Fi unavailable – continuing offline; retrying in background.");
+  }
+  feedback.networkBusy(false);
+  Serial.printf("[SETUP] %d tap(s) waiting to upload.\n", outbox.size());
+
+  printHelp();
+  drawReady();
+  checkDayRollover();
+  lastDayCheckMs = millis();
+}
+
+void loop() {
+  feedback.update();
+  pollSerialCommands();
+  pollResetButton();
+  cloud.maintain();
+  feedback.networkBusy(cloud.busy());
+
+  SyncOutcome outcome;
+  if (cloud.pollResult(outcome)) handleUploadResult(outcome);
+  pumpUploads();
+
+  unsigned long now = millis();
+
+  if (now - lastReaderCheckMs >= READER_HEALTH_CHECK_MS) {
+    lastReaderCheckMs = now;
+    checkReaderHealth();
+  }
+  if (now - lastDayCheckMs >= DAY_CHECK_INTERVAL_MS) {
+    lastDayCheckMs = now;
+    checkDayRollover();
+  }
+
+  // ENROLL window timed out without a tap.
+  if (enrollArmed && (long)(now - enrollDeadline) >= 0) {
+    enrollArmed = false;
+    Serial.println(F("[ENROLL] Timed out – no card tapped."));
+  }
+
+  // Return to the ready screen once a timed message expires, or redraw
+  // it when Wi-Fi / queue / reader state changes.
+  if (screenState == ScreenState::MESSAGE) {
+    if (now - messageShownAt >= messageHoldMs) drawReady();
+  } else if (cloud.isConnected() != shownWifi ||
+             outbox.size()       != shownPending ||
+             readerOk            != shownReaderOk) {
+    drawReady();
+  }
+
+  // Rate-limit RFID polling (~25×/s) – keeps the SPI bus and CPU calm.
+  if (now - lastReaderPollMs < READER_POLL_MS) return;
+  lastReaderPollMs = now;
+
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
+
+  String uid = readCardUID();
+  // Release the card immediately so the antenna is free for the next tap.
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
+
+  // Same-card cooldown (except during ENROLL so teacher doesn't wait).
+  if (!enrollArmed && uid == lastScannedUid &&
+      (now - lastScanMs) < SAME_CARD_COOLDOWN_MS) return;
+
+  lastScannedUid = uid;
+  lastScanMs     = now;
+  Serial.print("\n[SCAN] UID: "); Serial.println(uid);
+
+  // ── ENROLL mode: this tap registers the card ──────────────────────
+  if (enrollArmed) {
+    enrollArmed = false;
+    enrollAndReport(uid, enrollName, "via card tap");
+    return;
+  }
+
+  // ── Roster lookup ─────────────────────────────────────────────────
+  int          index;
+  LookupResult result = students.lookup(uid, index);
+
+  if (result == LookupResult::UNKNOWN_CARD) {
+    showTimedMessage("ACCESS DENIED", "Unknown Card!", "UID: " + uid,
+                     "Not Registered", RESULT_DISPLAY_MS);
+    Serial.println("[SCAN] Unknown card. To enroll it: ENROLL <Name>, then tap again.");
+    feedback.error();
+    return;
+  }
+
+  // ── Duplicate attendance on the same date is BLOCKED here ─────────
+  if (result == LookupResult::ALREADY_LOGGED) {
+    showTimedMessage("ALREADY LOGGED",
+                     students.at(index).name,
+                     "Status: Present",
+                     "Duplicate scan", RESULT_DISPLAY_MS);
+    feedback.error();
+    return;
+  }
+
+  // ── NEW_ENTRY: persist first, then tell the student ───────────────
+  const String& name = students.at(index).name;
+  if (outbox.full()) {
+    Serial.println(F("[SYNC] Queue full; tap was not recorded. Restore Wi-Fi and try again."));
+    showTimedMessage("QUEUE FULL", "Tap not recorded", "Restore Wi-Fi", "then try again",
+                     RESULT_DISPLAY_MS * 2);
+    feedback.error();
+    return;
+  }
+  if (!outbox.push(uid, nowEpoch())) {
+    Serial.println(F("[SYNC] Could not save tap to flash; tap was not recorded."));
+    showTimedMessage("SAVE FAILED", "Tap not recorded", "Please try again", "",
+                     RESULT_DISPLAY_MS * 2);
+    feedback.error();
+    return;
+  }
+  students.markLogged(index);   // only mark present after the tap is durably queued
+
+  showTimedMessage("WELCOME!",
+                   name,
+                   cloud.isConnected() ? "Saving to cloud..." : "Saved (offline)",
+                   "", SUCCESS_DISPLAY_MS);
+  feedback.success();
+  nextUploadAt = 0;  // a fresh tap should not wait out a previous backoff
+}
