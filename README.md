@@ -17,11 +17,11 @@ Students tap a card → checked against the roster → logged on an OLED display
 
 | Feature | Details |
 |---------|---------|
-| 🔒 **Same-day duplicate block** | A student who already tapped today gets "ALREADY LOGGED" — the App Script also rejects duplicates server-side |
+| 🔒 **Same-day duplicate block** | A student who already tapped today gets "ALREADY LOGGED" — the Apps Script also rejects duplicates server-side |
 | ☁️ **Offline upload queue** | Accepted taps are saved to flash and retried when Wi-Fi is available; the queue holds up to 60 taps. When full, new taps are clearly rejected for retry instead of deleting older queued records. |
 | 📡 **Auto reconnect** | Wi-Fi drops are recovered automatically; taps made offline upload later with the **original tap time** |
 | 🌙 **Midnight rollover** | Attendance flags clear at midnight (via NTP) so the next day starts fresh |
-| 📋 **Persistent roster** | Students enrolled with `ENROLL`/`ADD` survive reboots |
+| 📋 **Two-student demo roster** | Up to two students can be enrolled with `ENROLL`/`ADD`; the roster survives reboots |
 | 🖥️ **Serial console** | Enroll/remove students, view roster, check status — all over the USB serial monitor |
 | 🔆 **OLED + LED + Buzzer** | Visual and audible feedback for every scan result |
 
@@ -155,20 +155,31 @@ Short-press the button → `Present: 0 / N` shown on the OLED.
 
 2. Go to **Extensions → Apps Script**. Copy the contents of [`backend/AppsScript.gs`](backend/AppsScript.gs) into the Apps Script editor. Replace its `API_KEY` placeholder with the same key used in your local upload sketch. Do not commit the real key to GitHub.
 
-3. **Deploy → New deployment → Web app**
+3. Create a tab named **Students** with this exact header row:
+
+   | URN | Student Name | Card UID |
+   |---|---|---|
+   | Your first student's URN | Name | UID from Serial Monitor |
+   | Your second student's URN | Name | UID from Serial Monitor |
+
+   The firmware supports two enrolled students for this demo. Card UIDs belong in the separate roster tab; they will not appear in the attendance date cells. Format the **Card UID** column as **Plain text** before entering UIDs so leading zeroes are kept.
+
+   To read each UID, open the ESP32 Serial Monitor at 115200 baud, enter `ENROLL Student 1`, and tap the first card or tag. Copy the `[SCAN] UID` value shown in Serial Monitor into that student's roster row. Repeat with `ENROLL Student 2` and the second credential. The device enrolls the card even though you did not know its UID beforehand.
+
+4. **Deploy → New deployment → Web app**
    - Execute as: **Me**
    - Who has access: **Anyone**
    - Click **Deploy**, copy the `/exec` URL
 
-4. **Authorize** the script when Google prompts:
+5. **Authorize** the script when Google prompts:
    Your account → *Google hasn't verified this app* → **Advanced** → **Go to … (unsafe)** → **Allow**
    (It's your own script, asking for access to your own sheet.)
 
-5. **Test from a browser** before touching the ESP32 using a temporary UID and your API key: `<your /exec URL>?uid=TEST0001&name=Browser%20Test&key=<your-api-key>`. Expect a success message and a row in the sheet; remove the test row afterward. Avoid sharing a URL that contains the key.
+6. **Test from a browser** only after adding that UID to the Students tab: `<your /exec URL>?uid=<card-uid>&name=<student-name>&key=<your-api-key>`. Expect a success message and a `P` in the date column. Avoid sharing a URL that contains the key.
 
-The script writes to the spreadsheet's active sheet. It adds the headers **Timestamp**, **Student Name**, and **Card UID** if the sheet is empty. Set the spreadsheet time zone to your local region so same-day duplicate checks follow the expected calendar day.
+On the first valid scan, the script creates an **Attendance Matrix** tab with **URN**, **Student Name**, a spacer column, and one column per date. Each accepted scan writes **P** in the matching student's row for that day. New dates are added to the right. The script keeps your existing scan-log tab unchanged. Set the spreadsheet time zone to your local region so date columns match your local day.
 
-6. After any later change to the script: **Deploy → Manage deployments → ✏️ Edit → New version → Deploy**.
+7. After any later change to the script: **Deploy → Manage deployments → ✏️ Edit → New version → Deploy**.
 
 ---
 
@@ -198,8 +209,8 @@ Open the Serial Monitor at **115200 baud** and type any of these:
 1. Boot log shows `MFRC522 version 0x.. (OK)`, `OLED found`, `Wi-Fi connected`, `Clock set via NTP`, no `[CONFIG]` warnings
 2. OLED shows `SYSTEM READY` / `Wi-Fi: Connected`
 3. Type `SELFTEST` → green, red, blue LEDs in sequence, then two beeps
-4. Type `ENROLL Your Name`, tap your card within 15 s → `STUDENT ADDED`
-5. Wait ~3 s, tap again → green LED, `WELCOME!`, then `ATTENDANCE LOGGED` + row in the sheet
+4. Type `ENROLL Student 1`, tap the first credential within 15 s; repeat with `ENROLL Student 2` for the second credential. Copy both `[SCAN] UID` values into the matching Students tab rows with the students' URNs and names.
+5. After the Students tab is filled and the backend is deployed, tap an enrolled card → green LED, `WELCOME!`, then `ATTENDANCE LOGGED` and a `P` under today's date
 6. Tap a third time → red LED, `ALREADY LOGGED` ← **duplicate blocking working**
 7. Tap an unknown card → red LED, `ACCESS DENIED` + UID shown in Serial log
 

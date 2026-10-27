@@ -90,7 +90,7 @@
 #define ENROLL_WINDOW_MS          15000
 
 // ── Roster / UID limits ───────────────────────────────────────────────
-#define MAX_STUDENTS   20
+#define MAX_STUDENTS    2
 #define MAX_UID_LENGTH 15
 
 // ── Buzzer tones ──────────────────────────────────────────────────────
