@@ -1029,8 +1029,8 @@ void handleUploadResult(const SyncOutcome& o) {
       outbox.popIfFront(o.uid, o.ts);
       uploadFailures = 0; nextUploadAt = 0;
       Serial.printf("[SYNC] %s: %s\n", o.uid, o.message);
-      title = "ATTENDANCE LOGGED";
-      line2  = String(o.message).startsWith("Duplicate") ? "Already in sheet" : "P saved to sheet";
+      title = "ATTENDANCE MARKED";
+      line2  = String(o.message).startsWith("Duplicate") ? "Already present" : "Present today";
       line3  = "Tap next card";
       displayMs = CLOUD_CONFIRM_DISPLAY_MS;
       break;
@@ -1306,10 +1306,10 @@ void loop() {
   }
   students.markLogged(index);   // only mark present after the tap is durably queued
 
-  showTimedMessage("WELCOME!",
+  showTimedMessage("MARKING...",
                    name,
-                   cloud.isConnected() ? "Saving to cloud..." : "Saved (offline)",
-                   "Wait for confirmation", 0xFFFFFFFFUL);
+                   cloud.isConnected() ? "Please wait..." : "Waiting for Wi-Fi",
+                   "", 0xFFFFFFFFUL);
   feedback.success();
   nextUploadAt = 0;  // a fresh tap should not wait out a previous backoff
 }

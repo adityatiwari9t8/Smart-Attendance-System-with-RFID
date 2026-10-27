@@ -210,7 +210,7 @@ Open the Serial Monitor at **115200 baud** and type any of these:
 2. OLED shows `SYSTEM READY` / `Wi-Fi: Connected`
 3. Type `SELFTEST` → green, red, blue LEDs in sequence, then two beeps
 4. Type `ENROLL Student 1`, tap the first credential within 15 s; repeat with `ENROLL Student 2` for the second credential. Copy both `[SCAN] UID` values into the matching Students tab rows with the students' URNs and names.
-5. After the Students tab is filled and the backend is deployed, tap an enrolled card and wait for the device to show `ATTENDANCE LOGGED` / `P saved to sheet` before presenting the next card. A `P` appears under today's date.
+5. After the Students tab is filled and the backend is deployed, tap an enrolled card and wait for the device to show `ATTENDANCE MARKED` before presenting the next card. A `P` appears under today's date.
 6. Tap a third time → red LED, `ALREADY LOGGED` ← **duplicate blocking working**
 7. Tap an unknown card → red LED, `ACCESS DENIED` + UID shown in Serial log
 
