@@ -1,24 +1,9 @@
-/**
- * Smart Attendance System — date-wise Google Sheets backend.
- *
- * The firmware sends uid, name, key, and the original tap timestamp (ts).
- * Card UIDs are looked up in column B of the RFID Attendance tab. The same
- * tab holds names and UIDs in A:B, a visual spacer in C, and date columns
- * starting at D. An accepted tap writes only "P" in the student's date cell.
- *
- * Deploy as a web app: Execute as Me; access Anyone. After editing this file,
- * deploy a new version from Manage deployments.
- */
-
-// Must exactly match API_KEY in your local Arduino upload sketch.
-// Keep the real key private; the repository template intentionally uses a
-// placeholder. Generate one with: openssl rand -hex 16
 var API_KEY = 'YOUR_API_KEY';
 
 var ATTENDANCE_SHEET_NAME = 'RFID Attendance';
 var ATTENDANCE_HEADERS = ['Student Name', 'Card UID', ''];
 var MAX_STUDENTS = 2;
-var FIRST_DATE_COLUMN = 4; // Column C is a visual spacer.
+var FIRST_DATE_COLUMN = 4;
 
 function doGet(e) {
   try {
