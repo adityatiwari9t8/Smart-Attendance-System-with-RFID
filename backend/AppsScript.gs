@@ -13,7 +13,7 @@
 // Must exactly match API_KEY in your local Arduino upload sketch.
 // Keep the real key private; the repository template intentionally uses a
 // placeholder. Generate one with: openssl rand -hex 16
-var API_KEY = 'CHANGE_ME_TO_A_LONG_RANDOM_STRING';
+var API_KEY = 'YOUR_API_KEY';
 
 var STUDENTS_SHEET_NAME = 'Students';
 var ATTENDANCE_SHEET_NAME = 'RFID Attendance';
@@ -36,7 +36,7 @@ function handleAttendanceRequest_(e) {
   var uid = normalizeUid_(params.uid || '');
   var requestName = String(params.name || '').trim();
 
-  if (API_KEY === 'CHANGE_ME_TO_A_LONG_RANDOM_STRING') {
+  if (API_KEY === 'YOUR_API_KEY') {
     return textResponse_('Error: Server API key not configured');
   }
   if (key !== API_KEY) {

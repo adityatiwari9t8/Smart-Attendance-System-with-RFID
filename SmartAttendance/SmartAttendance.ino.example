@@ -41,7 +41,7 @@
   "https://script.google.com/macros/s/YOUR_SCRIPT_ID/exec"
 
 // ── Shared secret the Apps Script checks ────────────────────────────
-#define API_KEY          "change-this-shared-secret"
+#define API_KEY          "YOUR_API_KEY"
 
 // ── Hardware pins ────────────────────────────────────────────────────
 #define PIN_LED_GREEN     13   // green LED  – attendance accepted
@@ -1098,7 +1098,7 @@ void checkConfiguration() {
     Serial.println(F("[CONFIG] GOOGLE_SCRIPT_URL should end with /exec."));
     ok = false;
   }
-  if (String(API_KEY) == "change-this-shared-secret") {
+  if (String(API_KEY) == "YOUR_API_KEY") {
     Serial.println(F("[CONFIG] API_KEY is still the placeholder."));
     ok = false;
   }
