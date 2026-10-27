@@ -74,7 +74,7 @@
 #define ERROR_BEEP_HOLD_MS          200
 #define RESET_HOLD_MS              3000
 #define BUTTON_RELEASE_WAIT_MS     5000
-#define SAME_CARD_COOLDOWN_MS      3000
+#define SAME_CARD_COOLDOWN_MS       500
 #define SUMMARY_DISPLAY_MS         3000
 #define BUTTON_DEBOUNCE_MS           40
 #define SYNC_QUEUE_LENGTH             4
@@ -1307,7 +1307,7 @@ void loop() {
   showTimedMessage("WELCOME!",
                    name,
                    cloud.isConnected() ? "Saving to cloud..." : "Saved (offline)",
-                   "", SUCCESS_DISPLAY_MS);
+                   "Tap next card", SUCCESS_DISPLAY_MS);
   feedback.success();
   nextUploadAt = 0;  // a fresh tap should not wait out a previous backoff
 }
