@@ -119,12 +119,12 @@ function readStudentRoster_(sheet) {
     var name = String(rows[i][1]).trim();
     var uid = normalizeUid_(rows[i][2]);
     if (!urn && !name && !uid) continue;
-    if (!urn || !name || !uid) {
-      throw new Error('Complete URN, Student Name, and Card UID for every roster entry');
+    if (!urn || !name) {
+      throw new Error('Complete URN and Student Name for every roster entry');
     }
     for (var j = 0; j < roster.length; j++) {
       if (roster[j].urn === urn) throw new Error('Each student must have a unique URN');
-      if (roster[j].uid === uid) throw new Error('Each student must have a unique Card UID');
+      if (uid && roster[j].uid === uid) throw new Error('Each student must have a unique Card UID');
     }
     roster.push({ urn: urn, name: name, uid: uid });
   }

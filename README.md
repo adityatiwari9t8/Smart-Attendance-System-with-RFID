@@ -162,7 +162,7 @@ Short-press the button → `Present: 0 / N` shown on the OLED.
    | Your first student's URN | Name | UID from Serial Monitor |
    | Your second student's URN | Name | UID from Serial Monitor |
 
-   The firmware supports two enrolled students for this demo. Card UIDs belong in the separate roster tab; they will not appear in the attendance date cells. Format the **Card UID** column as **Plain text** before entering UIDs so leading zeroes are kept.
+   The firmware supports two enrolled students for this demo. You can enter URNs and names first and leave **Card UID** blank until you scan the card or tag. Card UIDs belong in the separate roster tab; they will not appear in the attendance date cells. Format the **Card UID** column as **Plain text** before entering UIDs so leading zeroes are kept.
 
    To read each UID, open the ESP32 Serial Monitor at 115200 baud, enter `ENROLL Student 1`, and tap the first card or tag. Copy the `[SCAN] UID` value shown in Serial Monitor into that student's roster row. Repeat with `ENROLL Student 2` and the second credential. The device enrolls the card even though you did not know its UID beforehand.
 
