@@ -2,9 +2,9 @@
  * Smart Attendance System — date-wise Google Sheets backend.
  *
  * The firmware sends uid, name, key, and the original tap timestamp (ts).
- * Card UIDs are looked up in the Students tab. RFID Attendance is the matrix
- * with one row per student and one column per calendar date; an accepted
- * tap writes only "P" in that student's cell for the tap date.
+ * Card UIDs are looked up in column C of the RFID Attendance tab. The same
+ * tab holds URNs and names in A:B, a visual spacer in D, and date columns
+ * starting at E. An accepted tap writes only "P" in the student's date cell.
  *
  * Deploy as a web app: Execute as Me; access Anyone. After editing this file,
  * deploy a new version from Manage deployments.
@@ -15,12 +15,10 @@
 // placeholder. Generate one with: openssl rand -hex 16
 var API_KEY = 'YOUR_API_KEY';
 
-var STUDENTS_SHEET_NAME = 'Students';
 var ATTENDANCE_SHEET_NAME = 'RFID Attendance';
-var STUDENTS_HEADERS = ['URN', 'Student Name', 'Card UID'];
-var ATTENDANCE_HEADERS = ['URN', 'Student Name', ''];
+var ATTENDANCE_HEADERS = ['URN', 'Student Name', 'Card UID', ''];
 var MAX_STUDENTS = 2;
-var FIRST_DATE_COLUMN = 4; // Column C is a visual spacer.
+var FIRST_DATE_COLUMN = 5; // Column D is a visual spacer.
 
 function doGet(e) {
   try {
@@ -54,22 +52,21 @@ function handleAttendanceRequest_(e) {
   try {
     var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
     var timeZone = spreadsheet.getSpreadsheetTimeZone() || Session.getScriptTimeZone();
-    var studentsSheet = getStudentsSheet_(spreadsheet);
-    var roster = readStudentRoster_(studentsSheet);
+    var attendanceSheet = getAttendanceSheet_(spreadsheet);
+    var roster = readStudentRoster_(attendanceSheet);
     if (roster.length > MAX_STUDENTS) {
-      return textResponse_('Error: Students roster is limited to ' + MAX_STUDENTS + ' entries');
+      return textResponse_('Error: RFID Attendance roster is limited to ' + MAX_STUDENTS + ' entries');
     }
 
     var student = findStudentByUid_(roster, uid);
     if (!student) {
-      return textResponse_('Error: UID not found in Students roster');
+      return textResponse_('Error: UID not found in RFID Attendance column C');
     }
 
     var tapTime = tapTime_(params.ts);
     var dateKey = Utilities.formatDate(tapTime, timeZone, 'yyyy-MM-dd');
-    var attendanceSheet = getAttendanceSheet_(spreadsheet);
     var dateColumn = getOrCreateDateColumn_(attendanceSheet, dateKey);
-    var studentRow = getOrCreateStudentRow_(attendanceSheet, student);
+    var studentRow = student.row;
     var attendanceCell = attendanceSheet.getRange(studentRow, dateColumn);
 
     if (String(attendanceCell.getValue()).trim().toUpperCase() === 'P') {
@@ -83,29 +80,6 @@ function handleAttendanceRequest_(e) {
   } finally {
     lock.releaseLock();
   }
-}
-
-function getStudentsSheet_(spreadsheet) {
-  var sheet = spreadsheet.getSheetByName(STUDENTS_SHEET_NAME);
-  if (!sheet) sheet = spreadsheet.insertSheet(STUDENTS_SHEET_NAME);
-
-  if (sheet.getLastRow() === 0) {
-    sheet.getRange(1, 1, 1, STUDENTS_HEADERS.length).setValues([STUDENTS_HEADERS]);
-    sheet.getRange(1, 1, 1, STUDENTS_HEADERS.length).setFontWeight('bold');
-    sheet.setFrozenRows(1);
-    sheet.setColumnWidth(1, 120);
-    sheet.setColumnWidth(2, 180);
-    sheet.setColumnWidth(3, 150);
-  } else {
-    var headers = sheet.getRange(1, 1, 1, STUDENTS_HEADERS.length).getDisplayValues()[0];
-    if (headers.join('|') !== STUDENTS_HEADERS.join('|')) {
-      throw new Error('Students tab headers must be URN, Student Name, Card UID');
-    }
-  }
-
-  // Preserve leading zeroes when a numeric-looking UID is typed into the roster.
-  sheet.getRange(2, 3, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat('@');
-  return sheet;
 }
 
 function readStudentRoster_(sheet) {
@@ -126,7 +100,7 @@ function readStudentRoster_(sheet) {
       if (roster[j].urn === urn) throw new Error('Each student must have a unique URN');
       if (uid && roster[j].uid === uid) throw new Error('Each student must have a unique Card UID');
     }
-    roster.push({ urn: urn, name: name, uid: uid });
+    roster.push({ urn: urn, name: name, uid: uid, row: i + 2 });
   }
   return roster;
 }
@@ -140,22 +114,24 @@ function findStudentByUid_(roster, uid) {
 
 function getAttendanceSheet_(spreadsheet) {
   var sheet = spreadsheet.getSheetByName(ATTENDANCE_SHEET_NAME);
-  if (!sheet) sheet = spreadsheet.insertSheet(ATTENDANCE_SHEET_NAME);
+  if (!sheet) throw new Error('Create or rename the existing tab to RFID Attendance');
 
   if (sheet.getLastRow() === 0) {
     sheet.getRange(1, 1, 1, ATTENDANCE_HEADERS.length).setValues([ATTENDANCE_HEADERS]);
-    sheet.getRange(1, 1, 1, 3).setFontWeight('bold');
+    sheet.getRange(1, 1, 1, ATTENDANCE_HEADERS.length).setFontWeight('bold');
     sheet.setFrozenRows(1);
     sheet.setFrozenColumns(2);
     sheet.setColumnWidth(1, 120);
     sheet.setColumnWidth(2, 180);
-    sheet.setColumnWidth(3, 28);
+    sheet.setColumnWidth(3, 160);
+    sheet.setColumnWidth(4, 28);
   } else {
-    var headers = sheet.getRange(1, 1, 1, 2).getDisplayValues()[0];
-    if (headers[0] !== 'URN' || headers[1] !== 'Student Name') {
-      throw new Error('Attendance Matrix must start with URN and Student Name columns');
+    var headers = sheet.getRange(1, 1, 1, ATTENDANCE_HEADERS.length).getDisplayValues()[0];
+    if (headers[0] !== 'URN' || headers[1] !== 'Student Name' || headers[2] !== 'Card UID') {
+      throw new Error('RFID Attendance headers must be URN, Student Name, Card UID, then a blank spacer');
     }
   }
+  sheet.getRange(2, 3, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat('@');
   return sheet;
 }
 
@@ -174,23 +150,6 @@ function getOrCreateDateColumn_(sheet, dateKey) {
   sheet.getRange(1, newColumn).setFontWeight('bold').setHorizontalAlignment('center');
   sheet.setColumnWidth(newColumn, 100);
   return newColumn;
-}
-
-function getOrCreateStudentRow_(sheet, student) {
-  var lastRow = sheet.getLastRow();
-  if (lastRow >= 2) {
-    var urns = sheet.getRange(2, 1, lastRow - 1, 1).getDisplayValues();
-    for (var i = 0; i < urns.length; i++) {
-      if (String(urns[i][0]).trim() === student.urn) {
-        sheet.getRange(i + 2, 2).setValue(student.name);
-        return i + 2;
-      }
-    }
-  }
-
-  var row = Math.max(lastRow + 1, 2);
-  sheet.getRange(row, 1, 1, 2).setValues([[student.urn, student.name]]);
-  return row;
 }
 
 function normalizeUid_(value) {

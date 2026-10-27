@@ -155,16 +155,15 @@ Short-press the button → `Present: 0 / N` shown on the OLED.
 
 2. Go to **Extensions → Apps Script**. Copy the contents of [`backend/AppsScript.gs`](backend/AppsScript.gs) into the Apps Script editor. Replace its `API_KEY` placeholder with the same key used in your local upload sketch. Do not commit the real key to GitHub.
 
-3. Create a tab named **Students** with this exact header row:
+3. Use the existing **RFID Attendance** tab for the roster and attendance matrix. Set row 1 as:
 
-   | URN | Student Name | Card UID |
-   |---|---|---|
-   | Your first student's URN | Name | UID from Serial Monitor |
-   | Your second student's URN | Name | UID from Serial Monitor |
+   | A | B | C | D | E onward |
+   |---|---|---|---|---|
+   | URN | Student Name | Card UID | *(blank spacer)* | Dates added automatically |
 
-   The firmware supports two enrolled students for this demo. You can enter URNs and names first and leave **Card UID** blank until you scan the card or tag. Card UIDs belong in the separate roster tab; they will not appear in the attendance date cells. Format the **Card UID** column as **Plain text** before entering UIDs so leading zeroes are kept.
+   Keep each student's URN, name, and UID together on rows 2–3. The firmware supports two enrolled students for this demo. Leave Card UID cells blank until you scan the card or tag. Format column C as **Plain text** before entering UIDs so leading zeroes are kept. Dates expand rightward from column E; attendance cells contain only `P`.
 
-   To read each UID, open the ESP32 Serial Monitor at 115200 baud, enter `ENROLL Student 1`, and tap the first card or tag. Copy the `[SCAN] UID` value shown in Serial Monitor into that student's roster row. Repeat with `ENROLL Student 2` and the second credential. The device enrolls the card even though you did not know its UID beforehand.
+   To read each UID, open the ESP32 Serial Monitor at 115200 baud, enter `ENROLL Aditya`, and tap the first card or tag. Copy the `[SCAN] UID` value shown in Serial Monitor into C2. Repeat with `ENROLL Utkarsh` and the second credential, then copy its UID into C3. The device enrolls the credential even though you did not know its UID beforehand.
 
 4. **Deploy → New deployment → Web app**
    - Execute as: **Me**
@@ -175,9 +174,9 @@ Short-press the button → `Present: 0 / N` shown on the OLED.
    Your account → *Google hasn't verified this app* → **Advanced** → **Go to … (unsafe)** → **Allow**
    (It's your own script, asking for access to your own sheet.)
 
-6. **Test from a browser** only after adding that UID to the Students tab: `<your /exec URL>?uid=<card-uid>&name=<student-name>&key=<your-api-key>`. Expect a success message and a `P` in the date column. Avoid sharing a URL that contains the key.
+6. **Test from a browser** only after adding that UID to column C of **RFID Attendance**: `<your /exec URL>?uid=<card-uid>&name=<student-name>&key=<your-api-key>`. Expect a success message and a `P` in the date column. Avoid sharing a URL that contains the key.
 
-The script writes the matrix to **RFID Attendance**, with **URN**, **Student Name**, a spacer column, and one column per date. Each accepted scan writes **P** in the matching student's row for that day. New dates are added to the right. The **Students** roster tab can be hidden to keep the attendance view uncluttered; unhide it when you need to enter or update student details and card UIDs. Set the spreadsheet time zone to your local region so date columns match your local day.
+The script uses the existing **RFID Attendance** tab for both the roster and attendance matrix. Columns A–C contain **URN**, **Student Name**, and **Card UID**; column D is a spacer; date columns begin at E and expand to the right. Each accepted scan writes **P** in the matching student's row for that day. Set the spreadsheet time zone to your local region so date columns match your local day.
 
 7. After any later change to the script: **Deploy → Manage deployments → ✏️ Edit → New version → Deploy**.
 
@@ -209,8 +208,8 @@ Open the Serial Monitor at **115200 baud** and type any of these:
 1. Boot log shows `MFRC522 version 0x.. (OK)`, `OLED found`, `Wi-Fi connected`, `Clock set via NTP`, no `[CONFIG]` warnings
 2. OLED shows `SYSTEM READY` / `Wi-Fi: Connected`
 3. Type `SELFTEST` → green, red, blue LEDs in sequence, then two beeps
-4. Type `ENROLL Student 1`, tap the first credential within 15 s; repeat with `ENROLL Student 2` for the second credential. Copy both `[SCAN] UID` values into the matching Students tab rows with the students' URNs and names.
-5. After the Students tab is filled and the backend is deployed, tap an enrolled card and wait for the device to show `ATTENDANCE MARKED` before presenting the next card. A `P` appears under today's date.
+4. Type `ENROLL Aditya`, tap the first credential within 15 s, and copy its `[SCAN] UID` into C2. Repeat with `ENROLL Utkarsh` for the second credential and copy its UID into C3.
+5. After both UID cells are filled and the backend is deployed, tap an enrolled card and wait for the device to show `ATTENDANCE MARKED` before presenting the next card. A `P` appears under today's date.
 6. Tap a third time → red LED, `ALREADY LOGGED` ← **duplicate blocking working**
 7. Tap an unknown card → red LED, `ACCESS DENIED` + UID shown in Serial log
 
