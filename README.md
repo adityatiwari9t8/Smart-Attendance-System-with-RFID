@@ -177,7 +177,7 @@ Short-press the button → `Present: 0 / N` shown on the OLED.
 
 6. **Test from a browser** only after adding that UID to the Students tab: `<your /exec URL>?uid=<card-uid>&name=<student-name>&key=<your-api-key>`. Expect a success message and a `P` in the date column. Avoid sharing a URL that contains the key.
 
-On the first valid scan, the script creates an **Attendance Matrix** tab with **URN**, **Student Name**, a spacer column, and one column per date. Each accepted scan writes **P** in the matching student's row for that day. New dates are added to the right. The script keeps your existing scan-log tab unchanged. Set the spreadsheet time zone to your local region so date columns match your local day.
+The script writes the matrix to **Sheet1**, with **URN**, **Student Name**, a spacer column, and one column per date. Each accepted scan writes **P** in the matching student's row for that day. New dates are added to the right. Keep the previous scan log in the separate **Attendance Log** tab. Set the spreadsheet time zone to your local region so date columns match your local day.
 
 7. After any later change to the script: **Deploy → Manage deployments → ✏️ Edit → New version → Deploy**.
 

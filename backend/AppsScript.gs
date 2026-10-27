@@ -2,8 +2,8 @@
  * Smart Attendance System — date-wise Google Sheets backend.
  *
  * The firmware sends uid, name, key, and the original tap timestamp (ts).
- * Card UIDs are looked up in the Students tab. The Attendance Matrix tab
- * contains one row per student and one column per calendar date; an accepted
+ * Card UIDs are looked up in the Students tab. Sheet1 is the attendance matrix
+ * with one row per student and one column per calendar date; an accepted
  * tap writes only "P" in that student's cell for the tap date.
  *
  * Deploy as a web app: Execute as Me; access Anyone. After editing this file,
@@ -16,7 +16,7 @@
 var API_KEY = 'CHANGE_ME_TO_A_LONG_RANDOM_STRING';
 
 var STUDENTS_SHEET_NAME = 'Students';
-var ATTENDANCE_SHEET_NAME = 'Attendance Matrix';
+var ATTENDANCE_SHEET_NAME = 'Sheet1';
 var STUDENTS_HEADERS = ['URN', 'Student Name', 'Card UID'];
 var ATTENDANCE_HEADERS = ['URN', 'Student Name', ''];
 var MAX_STUDENTS = 2;
